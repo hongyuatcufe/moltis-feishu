@@ -8,6 +8,7 @@
 use {
     serde::{Deserialize, Serialize},
     std::{
+        collections::HashSet,
         path::{Path, PathBuf},
         time::{SystemTime, UNIX_EPOCH},
     },
@@ -58,6 +59,8 @@ pub struct AgentPersona {
     pub name: String,
     #[serde(default)]
     pub is_default: bool,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub aliases: Vec<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub emoji: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -74,6 +77,8 @@ pub struct CreateAgentParams {
     pub id: String,
     pub name: String,
     #[serde(default)]
+    pub aliases: Option<Vec<String>>,
+    #[serde(default)]
     pub emoji: Option<String>,
     #[serde(default)]
     pub theme: Option<String>,
@@ -87,6 +92,8 @@ pub struct UpdateAgentParams {
     #[serde(default)]
     pub name: Option<String>,
     #[serde(default)]
+    pub aliases: Option<Vec<String>>,
+    #[serde(default)]
     pub emoji: Option<String>,
     #[serde(default)]
     pub theme: Option<String>,
@@ -99,6 +106,7 @@ struct AgentRow {
     id: String,
     name: String,
     is_default: i64,
+    aliases: String,
     emoji: Option<String>,
     theme: Option<String>,
     description: Option<String>,
@@ -112,6 +120,7 @@ impl From<AgentRow> for AgentPersona {
             id: r.id,
             name: r.name,
             is_default: r.is_default != 0,
+            aliases: parse_aliases_json(&r.aliases),
             emoji: r.emoji,
             theme: r.theme,
             description: r.description,
@@ -119,6 +128,10 @@ impl From<AgentRow> for AgentPersona {
             updated_at: r.updated_at,
         }
     }
+}
+
+fn parse_aliases_json(raw: &str) -> Vec<String> {
+    serde_json::from_str::<Vec<String>>(raw).unwrap_or_default()
 }
 
 /// Validate an agent ID: lowercase alphanumeric + hyphens, 1-50 chars, not "main".
@@ -149,6 +162,49 @@ pub fn validate_agent_id(id: &str) -> Result<()> {
     Ok(())
 }
 
+fn validate_agent_alias(alias: &str) -> Result<()> {
+    if alias == "main" {
+        return Err(AgentError::InvalidRequest(
+            "alias 'main' is reserved".to_string(),
+        ));
+    }
+    if alias.is_empty() || alias.len() > 50 {
+        return Err(AgentError::InvalidRequest(
+            "alias must be 1-50 characters".to_string(),
+        ));
+    }
+    if !alias
+        .chars()
+        .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-')
+    {
+        return Err(AgentError::InvalidRequest(
+            "alias must contain only lowercase letters, digits, and hyphens".to_string(),
+        ));
+    }
+    if alias.starts_with('-') || alias.ends_with('-') {
+        return Err(AgentError::InvalidRequest(
+            "alias must not start or end with a hyphen".to_string(),
+        ));
+    }
+    Ok(())
+}
+
+fn normalize_aliases(raw: Option<Vec<String>>) -> Result<Vec<String>> {
+    let mut normalized = Vec::new();
+    let mut seen = HashSet::new();
+    for alias in raw.unwrap_or_default() {
+        let candidate = alias.trim().to_ascii_lowercase();
+        if candidate.is_empty() {
+            continue;
+        }
+        validate_agent_alias(&candidate)?;
+        if seen.insert(candidate.clone()) {
+            normalized.push(candidate);
+        }
+    }
+    Ok(normalized)
+}
+
 /// SQLite-backed agent persona store.
 pub struct AgentPersonaStore {
     pool: sqlx::SqlitePool,
@@ -157,6 +213,41 @@ pub struct AgentPersonaStore {
 impl AgentPersonaStore {
     pub fn new(pool: sqlx::SqlitePool) -> Self {
         Self { pool }
+    }
+
+    async fn ensure_aliases_available(
+        &self,
+        agent_id: &str,
+        aliases: &[String],
+    ) -> Result<()> {
+        if aliases.is_empty() {
+            return Ok(());
+        }
+
+        let rows = sqlx::query_as::<_, (String, String)>(
+            "SELECT id, aliases FROM agents WHERE id != ?",
+        )
+        .bind(agent_id)
+        .fetch_all(&self.pool)
+        .await?;
+
+        let mut taken = HashSet::new();
+        taken.insert("main".to_string());
+        for (id, aliases_json) in rows {
+            taken.insert(id);
+            for alias in parse_aliases_json(&aliases_json) {
+                taken.insert(alias);
+            }
+        }
+
+        for alias in aliases {
+            if taken.contains(alias) {
+                return Err(AgentError::InvalidRequest(format!(
+                    "alias '{alias}' is already in use"
+                )));
+            }
+        }
+        Ok(())
     }
 
     /// Return the current default agent ID.
@@ -262,14 +353,24 @@ impl AgentPersonaStore {
     /// Create a new agent persona and its workspace directory.
     pub async fn create(&self, params: CreateAgentParams) -> Result<AgentPersona> {
         validate_agent_id(&params.id)?;
+        let aliases = normalize_aliases(params.aliases)?;
+        if aliases.iter().any(|a| a == &params.id) {
+            return Err(AgentError::InvalidRequest(
+                "alias cannot be the same as agent id".to_string(),
+            ));
+        }
+        self.ensure_aliases_available(&params.id, &aliases).await?;
+        let aliases_json =
+            serde_json::to_string(&aliases).map_err(|e| AgentError::InvalidRequest(e.to_string()))?;
 
         let now = now_ms();
         sqlx::query(
-            r#"INSERT INTO agents (id, name, is_default, emoji, theme, description, created_at, updated_at)
-               VALUES (?, ?, 0, ?, ?, ?, ?, ?)"#,
+            r#"INSERT INTO agents (id, name, is_default, aliases, emoji, theme, description, created_at, updated_at)
+               VALUES (?, ?, 0, ?, ?, ?, ?, ?, ?)"#,
         )
         .bind(&params.id)
         .bind(&params.name)
+        .bind(&aliases_json)
         .bind(&params.emoji)
         .bind(&params.theme)
         .bind(&params.description)
@@ -292,6 +393,7 @@ impl AgentPersonaStore {
             id: params.id,
             name: params.name,
             is_default: false,
+            aliases,
             emoji: params.emoji,
             theme: params.theme,
             description: params.description,
@@ -314,15 +416,30 @@ impl AgentPersonaStore {
             .ok_or_else(|| AgentError::NotFound(format!("agent '{id}' not found")))?;
 
         let name = params.name.unwrap_or(existing.name);
+        let aliases = if let Some(requested) = params.aliases {
+            let normalized = normalize_aliases(Some(requested))?;
+            if normalized.iter().any(|a| a == id) {
+                return Err(AgentError::InvalidRequest(
+                    "alias cannot be the same as agent id".to_string(),
+                ));
+            }
+            self.ensure_aliases_available(id, &normalized).await?;
+            normalized
+        } else {
+            existing.aliases
+        };
+        let aliases_json =
+            serde_json::to_string(&aliases).map_err(|e| AgentError::InvalidRequest(e.to_string()))?;
         let emoji = params.emoji.or(existing.emoji);
         let theme = params.theme.or(existing.theme);
         let description = params.description.or(existing.description);
         let now = now_ms();
 
         sqlx::query(
-            "UPDATE agents SET name = ?, emoji = ?, theme = ?, description = ?, updated_at = ? WHERE id = ?",
+            "UPDATE agents SET name = ?, aliases = ?, emoji = ?, theme = ?, description = ?, updated_at = ? WHERE id = ?",
         )
         .bind(&name)
+        .bind(&aliases_json)
         .bind(&emoji)
         .bind(&theme)
         .bind(&description)
@@ -343,6 +460,7 @@ impl AgentPersonaStore {
             id: id.to_string(),
             name,
             is_default: existing.is_default,
+            aliases,
             emoji,
             theme,
             description,
@@ -409,6 +527,7 @@ fn synthesize_main_agent(is_default: bool) -> AgentPersona {
             .and_then(|i| i.name.clone())
             .unwrap_or_else(|| "moltis".to_string()),
         is_default,
+        aliases: Vec::new(),
         emoji: identity.as_ref().and_then(|i| i.emoji.clone()),
         theme: identity.as_ref().and_then(|i| i.theme.clone()),
         description: Some("Default agent".to_string()),
@@ -460,6 +579,7 @@ mod tests {
                 id          TEXT PRIMARY KEY,
                 name        TEXT NOT NULL,
                 is_default  INTEGER NOT NULL DEFAULT 0,
+                aliases     TEXT NOT NULL DEFAULT '[]',
                 emoji       TEXT,
                 theme       TEXT,
                 description TEXT,
@@ -492,6 +612,7 @@ mod tests {
             .create(CreateAgentParams {
                 id: "research".to_string(),
                 name: "Research Assistant".to_string(),
+                aliases: Some(vec!["alice".to_string()]),
                 emoji: Some("🔬".to_string()),
                 theme: Some("analytical".to_string()),
                 description: Some("Helps with research tasks".to_string()),
@@ -502,6 +623,7 @@ mod tests {
         assert_eq!(agent.id, "research");
         assert_eq!(agent.name, "Research Assistant");
         assert!(!agent.is_default);
+        assert_eq!(agent.aliases, vec!["alice".to_string()]);
         assert_eq!(agent.emoji.as_deref(), Some("🔬"));
 
         let fetched = store.get("research").await.unwrap().unwrap();
@@ -516,6 +638,7 @@ mod tests {
             .create(CreateAgentParams {
                 id: "main".to_string(),
                 name: "Main".to_string(),
+                aliases: None,
                 emoji: None,
                 theme: None,
                 description: None,
@@ -532,6 +655,7 @@ mod tests {
             .create(CreateAgentParams {
                 id: "INVALID".to_string(),
                 name: "Test".to_string(),
+                aliases: None,
                 emoji: None,
                 theme: None,
                 description: None,
@@ -548,6 +672,7 @@ mod tests {
             .create(CreateAgentParams {
                 id: "writer".to_string(),
                 name: "Writer".to_string(),
+                aliases: None,
                 emoji: None,
                 theme: None,
                 description: None,
@@ -558,6 +683,7 @@ mod tests {
         let updated = store
             .update("writer", UpdateAgentParams {
                 name: Some("Creative Writer".to_string()),
+                aliases: Some(vec!["alice".to_string(), "writer-helper".to_string()]),
                 emoji: Some("✍️".to_string()),
                 theme: None,
                 description: None,
@@ -566,6 +692,10 @@ mod tests {
             .unwrap();
 
         assert_eq!(updated.name, "Creative Writer");
+        assert_eq!(
+            updated.aliases,
+            vec!["alice".to_string(), "writer-helper".to_string()]
+        );
         assert_eq!(updated.emoji.as_deref(), Some("✍️"));
     }
 
@@ -576,6 +706,7 @@ mod tests {
         let result = store
             .update("main", UpdateAgentParams {
                 name: Some("Changed".to_string()),
+                aliases: None,
                 emoji: None,
                 theme: None,
                 description: None,
@@ -592,6 +723,7 @@ mod tests {
             .create(CreateAgentParams {
                 id: "temp".to_string(),
                 name: "Temporary".to_string(),
+                aliases: None,
                 emoji: None,
                 theme: None,
                 description: None,
@@ -618,6 +750,7 @@ mod tests {
             .create(CreateAgentParams {
                 id: "ops".to_string(),
                 name: "Ops".to_string(),
+                aliases: None,
                 emoji: None,
                 theme: None,
                 description: None,
@@ -639,6 +772,7 @@ mod tests {
             .create(CreateAgentParams {
                 id: "ops".to_string(),
                 name: "Ops".to_string(),
+                aliases: None,
                 emoji: None,
                 theme: None,
                 description: None,
@@ -665,6 +799,7 @@ mod tests {
             .create(CreateAgentParams {
                 id: "beta".to_string(),
                 name: "Beta".to_string(),
+                aliases: None,
                 emoji: None,
                 theme: None,
                 description: None,
@@ -676,6 +811,7 @@ mod tests {
             .create(CreateAgentParams {
                 id: "alpha".to_string(),
                 name: "Alpha".to_string(),
+                aliases: None,
                 emoji: None,
                 theme: None,
                 description: None,
@@ -697,5 +833,35 @@ mod tests {
         let main = store.get("main").await.unwrap().unwrap();
         assert_eq!(main.id, "main");
         assert!(main.is_default);
+    }
+
+    #[tokio::test]
+    async fn test_alias_collision_rejected() {
+        let pool = test_pool().await;
+        let store = AgentPersonaStore::new(pool);
+
+        store
+            .create(CreateAgentParams {
+                id: "writer".to_string(),
+                name: "Writer".to_string(),
+                aliases: Some(vec!["alice".to_string()]),
+                emoji: None,
+                theme: None,
+                description: None,
+            })
+            .await
+            .unwrap();
+
+        let result = store
+            .create(CreateAgentParams {
+                id: "reviewer".to_string(),
+                name: "Reviewer".to_string(),
+                aliases: Some(vec!["alice".to_string()]),
+                emoji: None,
+                theme: None,
+                description: None,
+            })
+            .await;
+        assert!(result.is_err());
     }
 }

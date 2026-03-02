@@ -12,6 +12,7 @@
 
 pub mod agent_persona;
 pub mod approval;
+pub mod attachment_store;
 pub mod auth;
 pub mod auth_middleware;
 pub mod auth_routes;

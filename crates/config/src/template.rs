@@ -370,6 +370,47 @@ max_redirects = 3                 # Maximum HTTP redirects to follow
 readability = true                # Use readability extraction for HTML (cleaner output)
 # ssrf_allowlist = ["172.22.0.0/16"] # CIDR ranges exempt from SSRF blocking (e.g. Docker networks)
 
+# ── CN Web Search ─────────────────────────────────────────────────────────────
+# Multi-provider Chinese web search (Metaso / Bocha / Anspire / Jina).
+
+[tools.web.cn_search]
+enabled = false                   # Enable Chinese web search tool
+timeout_seconds = 25              # HTTP request timeout
+
+# Example provider config:
+# [tools.web.cn_search.metaso]
+# enabled = true
+# [[tools.web.cn_search.metaso.accounts]]
+# name = "main"
+# api_key = "..."
+# enabled = true
+
+# ── Web Read ──────────────────────────────────────────────────────────────────
+# Full-text reader with fallback chain (Jina → Metaso → Crawl4AI → Pinchtab).
+
+[tools.web.read]
+enabled = false
+min_chars = 300                   # Minimum chars required to accept a backend response
+cache_ttl_minutes = 15
+# ssrf_allowlist = ["172.22.0.0/16"]
+
+# [tools.web.read.jina]
+# enabled = true
+# [[tools.web.read.jina.accounts]]
+# name = "main"
+# api_key = "..."
+# enabled = true
+
+# [tools.web.read.crawl4ai]
+# endpoint = "https://crawl4ai.example.com"
+# api_token = "..."
+# timeout_seconds = 60
+
+# [tools.web.read.pinchtab]
+# endpoint = "http://127.0.0.1:9867"
+# token = "..."
+# timeout_seconds = 60
+
 # ── Browser Automation ────────────────────────────────────────────────────────
 # Full browser control via Chrome DevTools Protocol (CDP).
 # Use for JavaScript-heavy sites, form filling, screenshots.
@@ -563,6 +604,17 @@ reset_on_exit = true              # Reset serve/funnel when gateway shuts down
 # webhook_secret = "..."          # Optional query secret for webhook URL (?secret=...)
 # allowlist = []                  # User IDs allowed to DM (empty = all unless dm_policy=allowlist)
 
+# Feishu bots (WebSocket)
+# [channels.feishu.my-bot]
+# app_id = "..."                  # Feishu app ID
+# app_secret = "..."              # Feishu app secret
+# base_url = "https://open.feishu.cn" # API domain (use https://open.larksuite.com for Lark)
+# ws_endpoint = ""                # Optional direct WS URL override (normally leave empty)
+# allowlist = []                  # User IDs allowed to DM (empty = all unless dm_policy=allowlist)
+# agent_id = "main"               # Default agent for this bot
+# allow_agent_switch = false      # Allow /agent switching (true for multi-agent bot)
+# session_auto_archive_days = 30  # Auto-archive non-active sessions after N days (0 disables)
+
 # ══════════════════════════════════════════════════════════════════════════════
 # HOOKS
 # ══════════════════════════════════════════════════════════════════════════════
@@ -579,6 +631,7 @@ reset_on_exit = true              # Reset serve/funnel when gateway shuts down
 # [env]
 # BRAVE_API_KEY = "..."
 # OPENROUTER_API_KEY = "sk-or-..."
+# MOLTIS_COMPACT_KEEP_LAST_N = "12" # Keep N newest messages when /compact summarizes history
 
 # ══════════════════════════════════════════════════════════════════════════════
 # HOOKS

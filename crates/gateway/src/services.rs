@@ -1200,8 +1200,12 @@ pub struct GatewayServices {
     pub session_store: Option<Arc<moltis_sessions::store::SessionStore>>,
     /// Optional session share store for immutable snapshot links.
     pub session_share_store: Option<Arc<crate::share_store::ShareStore>>,
+    /// Optional global attachment blob store (deduplicated + indexed).
+    pub attachment_store: Option<Arc<crate::attachment_store::AttachmentStore>>,
     /// Optional agent persona store for multi-agent support.
     pub agent_persona_store: Option<Arc<crate::agent_persona::AgentPersonaStore>>,
+    /// Optional per-session state store for ephemeral handoff/context packets.
+    pub session_state_store: Option<Arc<moltis_sessions::state_store::SessionStateStore>>,
 }
 
 impl GatewayServices {
@@ -1281,7 +1285,9 @@ impl GatewayServices {
             session_metadata: None,
             session_store: None,
             session_share_store: None,
+            attachment_store: None,
             agent_persona_store: None,
+            session_state_store: None,
         }
     }
 
@@ -1318,11 +1324,27 @@ impl GatewayServices {
         self
     }
 
+    pub fn with_attachment_store(
+        mut self,
+        store: Arc<crate::attachment_store::AttachmentStore>,
+    ) -> Self {
+        self.attachment_store = Some(store);
+        self
+    }
+
     pub fn with_agent_persona_store(
         mut self,
         store: Arc<crate::agent_persona::AgentPersonaStore>,
     ) -> Self {
         self.agent_persona_store = Some(store);
+        self
+    }
+
+    pub fn with_session_state_store(
+        mut self,
+        store: Arc<moltis_sessions::state_store::SessionStateStore>,
+    ) -> Self {
+        self.session_state_store = Some(store);
         self
     }
 

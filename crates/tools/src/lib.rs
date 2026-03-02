@@ -34,5 +34,7 @@ pub mod send_image;
 pub mod session_state;
 pub mod skill_tools;
 pub mod spawn_agent;
+pub mod web_cn_search;
 pub mod web_fetch;
+pub mod web_read;
 pub mod web_search;

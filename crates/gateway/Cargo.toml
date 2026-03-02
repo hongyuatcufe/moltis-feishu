@@ -29,6 +29,7 @@ moltis-browser         = { workspace = true }
 moltis-caldav          = { optional = true, workspace = true }
 moltis-canvas          = { workspace = true }
 moltis-channels        = { workspace = true }
+moltis-feishu          = { workspace = true }
 moltis-chat            = { workspace = true }
 moltis-common          = { workspace = true }
 moltis-config          = { workspace = true }

@@ -67,6 +67,7 @@ impl GatewayOnboardingService {
             let params = crate::agent_persona::CreateAgentParams {
                 id: agent.moltis_id.clone(),
                 name,
+                aliases: None,
                 emoji: None,
                 theme: agent.theme.clone(),
                 description: None,
@@ -381,6 +382,7 @@ mod tests {
                 id          TEXT PRIMARY KEY,
                 name        TEXT NOT NULL,
                 is_default  INTEGER NOT NULL DEFAULT 0,
+                aliases     TEXT NOT NULL DEFAULT '[]',
                 emoji       TEXT,
                 theme       TEXT,
                 description TEXT,

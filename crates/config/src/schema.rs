@@ -1085,7 +1085,7 @@ pub struct McpOAuthOverrideEntry {
 #[serde(default)]
 pub struct ChannelsConfig {
     /// Which channel types are offered in the web UI (onboarding + channels page).
-    /// Defaults to `["telegram"]`. Set to `["telegram", "msteams"]` to opt in to Teams.
+    /// Defaults to `["telegram"]`. Set to `["telegram", "msteams", "feishu"]` to opt in.
     #[serde(
         default = "default_channels_offered",
         skip_serializing_if = "Vec::is_empty"
@@ -1100,6 +1100,9 @@ pub struct ChannelsConfig {
     /// Microsoft Teams bot accounts, keyed by account ID.
     #[serde(default)]
     pub msteams: HashMap<String, serde_json::Value>,
+    /// Feishu bot accounts, keyed by account ID.
+    #[serde(default)]
+    pub feishu: HashMap<String, serde_json::Value>,
 }
 
 fn default_channels_offered() -> Vec<String> {
@@ -1113,6 +1116,7 @@ impl Default for ChannelsConfig {
             telegram: HashMap::new(),
             whatsapp: HashMap::new(),
             msteams: HashMap::new(),
+            feishu: HashMap::new(),
         }
     }
 }
@@ -1263,6 +1267,8 @@ pub enum MapProvider {
 pub struct WebConfig {
     pub search: WebSearchConfig,
     pub fetch: WebFetchConfig,
+    pub cn_search: WebCnSearchConfig,
+    pub read: WebReadConfig,
 }
 
 /// Search provider selection.
@@ -1363,6 +1369,145 @@ impl Default for WebFetchConfig {
             cache_ttl_minutes: 15,
             max_redirects: 3,
             readability: true,
+            ssrf_allowlist: Vec::new(),
+        }
+    }
+}
+
+/// API key entry for web tools.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ApiKeyEntry {
+    /// Human-readable account name.
+    pub name: String,
+    /// API key.
+    #[serde(serialize_with = "serialize_secret")]
+    pub api_key: Secret<String>,
+    /// Whether this key is enabled.
+    pub enabled: bool,
+}
+
+impl Default for ApiKeyEntry {
+    fn default() -> Self {
+        Self {
+            name: "default".into(),
+            api_key: Secret::new(String::new()),
+            enabled: true,
+        }
+    }
+}
+
+/// Provider config that holds one or more API keys.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ApiKeyProviderConfig {
+    pub enabled: bool,
+    pub accounts: Vec<ApiKeyEntry>,
+}
+
+impl Default for ApiKeyProviderConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            accounts: Vec::new(),
+        }
+    }
+}
+
+/// Crawl4AI reader backend config.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Crawl4AiConfig {
+    pub endpoint: String,
+    #[serde(serialize_with = "serialize_secret")]
+    pub api_token: Secret<String>,
+    pub timeout_seconds: u64,
+}
+
+impl Default for Crawl4AiConfig {
+    fn default() -> Self {
+        Self {
+            endpoint: String::new(),
+            api_token: Secret::new(String::new()),
+            timeout_seconds: 60,
+        }
+    }
+}
+
+/// Pinchtab local browser backend config.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct PinchtabConfig {
+    pub endpoint: String,
+    #[serde(serialize_with = "serialize_secret")]
+    pub token: Secret<String>,
+    pub timeout_seconds: u64,
+}
+
+impl Default for PinchtabConfig {
+    fn default() -> Self {
+        Self {
+            endpoint: "http://127.0.0.1:9867".into(),
+            token: Secret::new(String::new()),
+            timeout_seconds: 60,
+        }
+    }
+}
+
+/// Chinese web search tool configuration.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct WebCnSearchConfig {
+    pub enabled: bool,
+    pub metaso: ApiKeyProviderConfig,
+    pub bocha: ApiKeyProviderConfig,
+    pub anspire: ApiKeyProviderConfig,
+    pub jina: ApiKeyProviderConfig,
+    /// HTTP request timeout in seconds.
+    pub timeout_seconds: u64,
+}
+
+impl Default for WebCnSearchConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            metaso: ApiKeyProviderConfig::default(),
+            bocha: ApiKeyProviderConfig::default(),
+            anspire: ApiKeyProviderConfig::default(),
+            jina: ApiKeyProviderConfig::default(),
+            timeout_seconds: 25,
+        }
+    }
+}
+
+/// Web read (full-text) tool configuration.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct WebReadConfig {
+    pub enabled: bool,
+    pub jina: ApiKeyProviderConfig,
+    pub metaso: ApiKeyProviderConfig,
+    pub crawl4ai: Crawl4AiConfig,
+    pub pinchtab: PinchtabConfig,
+    /// Minimum number of characters required to accept a backend response.
+    pub min_chars: usize,
+    /// Cache TTL in minutes (0 to disable).
+    pub cache_ttl_minutes: u64,
+    /// CIDR ranges exempt from SSRF blocking.
+    #[serde(default)]
+    pub ssrf_allowlist: Vec<String>,
+}
+
+impl Default for WebReadConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            jina: ApiKeyProviderConfig::default(),
+            metaso: ApiKeyProviderConfig::default(),
+            crawl4ai: Crawl4AiConfig::default(),
+            pinchtab: PinchtabConfig::default(),
+            min_chars: 300,
+            cache_ttl_minutes: 15,
             ssrf_allowlist: Vec::new(),
         }
     }
@@ -1843,6 +1988,13 @@ fn serialize_option_secret<S: serde::Serializer>(
         Some(s) => serializer.serialize_some(s.expose_secret()),
         None => serializer.serialize_none(),
     }
+}
+
+fn serialize_secret<S: serde::Serializer>(
+    secret: &Secret<String>,
+    serializer: S,
+) -> Result<S::Ok, S::Error> {
+    serializer.serialize_str(secret.expose_secret())
 }
 
 fn deserialize_option_secret<'de, D>(deserializer: D) -> Result<Option<Secret<String>>, D::Error>

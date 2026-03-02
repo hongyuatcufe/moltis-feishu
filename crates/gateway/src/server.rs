@@ -1672,6 +1672,10 @@ pub async fn prepare_gateway(
     let session_state_store = Arc::new(moltis_sessions::state_store::SessionStateStore::new(
         db_pool.clone(),
     ));
+    let attachment_store = Arc::new(crate::attachment_store::AttachmentStore::new(
+        db_pool.clone(),
+        data_dir.clone(),
+    ));
 
     // Wire agent persona store for multi-agent support (created early so onboarding can use it).
     let agent_persona_store = Arc::new(crate::agent_persona::AgentPersonaStore::new(
@@ -2250,6 +2254,11 @@ pub async fn prepare_gateway(
                 .with_message_log(Arc::clone(&message_log))
                 .with_event_sink(Arc::clone(&channel_sink)),
         ));
+        let feishu_plugin = Arc::new(tokio::sync::RwLock::new(
+            moltis_feishu::FeishuPlugin::new()
+                .with_message_log(Arc::clone(&message_log))
+                .with_event_sink(Arc::clone(&channel_sink)),
+        ));
         msteams_webhook_plugin = Arc::clone(&msteams_plugin);
 
         #[cfg(feature = "whatsapp")]
@@ -2288,6 +2297,17 @@ pub async fn prepare_gateway(
                     tracing::warn!(account_id, "failed to start microsoft teams account: {e}");
                 } else {
                     started.insert(("msteams".into(), account_id.clone()));
+                }
+            }
+        }
+
+        {
+            let mut fs = feishu_plugin.write().await;
+            for (account_id, account_config) in &config.channels.feishu {
+                if let Err(e) = fs.start_account(account_id, account_config.clone()).await {
+                    tracing::warn!(account_id, "failed to start feishu account: {e}");
+                } else {
+                    started.insert(("feishu".into(), account_id.clone()));
                 }
             }
         }
@@ -2334,6 +2354,10 @@ pub async fn prepare_gateway(
                             let mut ms = msteams_plugin.write().await;
                             ms.start_account(&ch.account_id, ch.config).await
                         },
+                        Ok(moltis_channels::ChannelType::Feishu) => {
+                            let mut fs = feishu_plugin.write().await;
+                            fs.start_account(&ch.account_id, ch.config).await
+                        },
                         #[cfg(feature = "whatsapp")]
                         Ok(moltis_channels::ChannelType::Whatsapp) => {
                             let mut wa = whatsapp_plugin.write().await;
@@ -2376,6 +2400,10 @@ pub async fn prepare_gateway(
             let ms = msteams_plugin.read().await;
             (ms.shared_outbound(), ms.shared_stream_outbound())
         };
+        let (fs_outbound, fs_stream_outbound) = {
+            let fs = feishu_plugin.read().await;
+            (fs.shared_outbound(), fs.shared_stream_outbound())
+        };
         #[cfg(feature = "whatsapp")]
         let (wa_outbound, wa_stream_outbound) = {
             let wa = whatsapp_plugin.read().await;
@@ -2385,14 +2413,17 @@ pub async fn prepare_gateway(
         let multi_router = Arc::new(crate::channel_outbound::MultiChannelOutbound::new(
             Arc::clone(&tg_plugin),
             Arc::clone(&msteams_plugin),
+            Arc::clone(&feishu_plugin),
             #[cfg(feature = "whatsapp")]
             Arc::clone(&whatsapp_plugin),
             tg_outbound,
             ms_outbound,
+            fs_outbound,
             #[cfg(feature = "whatsapp")]
             wa_outbound,
             tg_stream_outbound,
             ms_stream_outbound,
+            fs_stream_outbound,
             #[cfg(feature = "whatsapp")]
             wa_stream_outbound,
         ));
@@ -2407,6 +2438,7 @@ pub async fn prepare_gateway(
         services.channel = Arc::new(crate::channel::LiveChannelService::new(
             tg_plugin,
             msteams_plugin,
+            feishu_plugin,
             #[cfg(feature = "whatsapp")]
             whatsapp_plugin,
             channel_store,
@@ -2417,7 +2449,9 @@ pub async fn prepare_gateway(
 
     services = services.with_session_metadata(Arc::clone(&session_metadata));
     services = services.with_session_store(Arc::clone(&session_store));
+    services = services.with_session_state_store(Arc::clone(&session_state_store));
     services = services.with_session_share_store(Arc::clone(&session_share_store));
+    services = services.with_attachment_store(Arc::clone(&attachment_store));
 
     services = services.with_agent_persona_store(Arc::clone(&agent_persona_store));
 
@@ -2971,8 +3005,20 @@ pub async fn prepare_gateway(
         ) {
             tool_registry.register(Box::new(t.with_env_provider(Arc::clone(&env_provider))));
         }
+        if let Some(t) = moltis_tools::web_cn_search::WebCnSearchTool::from_config_with_env_overrides(
+            &config.tools.web.cn_search,
+            &runtime_env_overrides,
+        ) {
+            tool_registry.register(Box::new(t));
+        }
         if let Some(t) = moltis_tools::web_fetch::WebFetchTool::from_config(&config.tools.web.fetch)
         {
+            tool_registry.register(Box::new(t));
+        }
+        if let Some(t) = moltis_tools::web_read::WebReadTool::from_config_with_env_overrides(
+            &config.tools.web.read,
+            &runtime_env_overrides,
+        ) {
             tool_registry.register(Box::new(t));
         }
         if let Some(t) = moltis_tools::browser::BrowserTool::from_config(&config.tools.browser) {

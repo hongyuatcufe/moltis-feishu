@@ -13,6 +13,7 @@ members = [
   "crates/common",
   "crates/config",
   "crates/cron",
+  "crates/feishu",
   "crates/gateway",
   "crates/graphql",
   "crates/mcp",
@@ -122,6 +123,7 @@ open               = "5.3"
 rand               = "0.9"
 regex              = "1"
 secrecy            = { features = ["serde"], version = "0.8" }
+prost              = "0.14"
 sha2               = "0.10"
 sled               = "0.34"
 sysinfo            = "0.34"
@@ -211,6 +213,7 @@ moltis-graphql         = { path = "crates/graphql" }
 moltis-mcp             = { path = "crates/mcp" }
 moltis-media           = { path = "crates/media" }
 moltis-memory          = { path = "crates/memory" }
+moltis-feishu          = { path = "crates/feishu" }
 moltis-metrics         = { path = "crates/metrics" }
 moltis-msteams         = { path = "crates/msteams" }
 moltis-oauth           = { path = "crates/oauth" }

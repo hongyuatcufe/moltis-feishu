@@ -219,6 +219,15 @@ impl SessionMetadata {
         }
     }
 
+    /// Mark/unmark a session as archived.
+    pub fn set_archived(&mut self, key: &str, archived: bool) {
+        if let Some(entry) = self.entries.get_mut(key) {
+            entry.archived = archived;
+            entry.updated_at = now_ms();
+            entry.version += 1;
+        }
+    }
+
     /// List all sessions belonging to a given agent.
     pub fn list_by_agent_id(&self, agent_id: &str) -> Vec<SessionEntry> {
         let mut entries: Vec<_> = self
@@ -652,6 +661,23 @@ impl SqliteSessionMetadata {
         Ok(())
     }
 
+    /// Mark/unmark a session as archived.
+    pub async fn set_archived(&self, key: &str, archived: bool) -> Result<()> {
+        let now = now_ms() as i64;
+        sqlx::query(
+            "UPDATE sessions SET archived = ?, updated_at = ?, version = version + 1 WHERE key = ?",
+        )
+        .bind(if archived { 1_i32 } else { 0_i32 })
+        .bind(now)
+        .bind(key)
+        .execute(&self.pool)
+        .await?;
+        self.emit(crate::session_events::SessionEvent::Patched {
+            session_key: key.to_string(),
+        });
+        Ok(())
+    }
+
     /// List all sessions belonging to a given agent.
     pub async fn list_by_agent_id(&self, agent_id: &str) -> Result<Vec<SessionEntry>> {
         let rows = sqlx::query_as::<_, SessionRow>(
@@ -993,6 +1019,21 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_sqlite_set_archived() {
+        let pool = sqlite_pool().await;
+        let meta = SqliteSessionMetadata::new(pool);
+
+        meta.upsert("main", None).await.unwrap();
+        assert!(!meta.get("main").await.unwrap().archived);
+
+        meta.set_archived("main", true).await.unwrap();
+        assert!(meta.get("main").await.unwrap().archived);
+
+        meta.set_archived("main", false).await.unwrap();
+        assert!(!meta.get("main").await.unwrap().archived);
+    }
+
+    #[tokio::test]
     async fn test_sqlite_set_timestamps_and_counts() {
         let pool = sqlite_pool().await;
         let meta = SqliteSessionMetadata::new(pool);
@@ -1043,6 +1084,27 @@ mod tests {
         meta.upsert("main", None);
         meta.touch("main", 5);
         assert_eq!(meta.get("main").unwrap().message_count, 5);
+    }
+
+    #[test]
+    fn test_set_archived() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("meta.json");
+        let mut meta = SessionMetadata::load(path.clone()).unwrap();
+
+        meta.upsert("main", None);
+        assert!(!meta.get("main").unwrap().archived);
+
+        meta.set_archived("main", true);
+        assert!(meta.get("main").unwrap().archived);
+
+        meta.set_archived("main", false);
+        assert!(!meta.get("main").unwrap().archived);
+
+        meta.set_archived("main", true);
+        meta.save().unwrap();
+        let reloaded = SessionMetadata::load(path).unwrap();
+        assert!(reloaded.get("main").unwrap().archived);
     }
 
     #[test]
@@ -1420,6 +1482,9 @@ mod tests {
 
         meta.set_agent_id("main", Some("agent-1")).await.unwrap();
         assert_eq!(meta.get("main").await.unwrap().version, 12);
+
+        meta.set_archived("main", true).await.unwrap();
+        assert_eq!(meta.get("main").await.unwrap().version, 13);
     }
 
     #[tokio::test]

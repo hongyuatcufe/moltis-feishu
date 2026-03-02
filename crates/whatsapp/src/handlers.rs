@@ -415,6 +415,7 @@ async fn handle_photo(
 
             let attachment = ChannelAttachment {
                 media_type,
+                original_name: None,
                 data: final_data,
             };
             if let Some(ref sink) = state.event_sink {
@@ -549,6 +550,7 @@ async fn handle_video(
     {
         let attachment = ChannelAttachment {
             media_type: "image/jpeg".to_string(),
+            original_name: None,
             data: thumb.clone(),
         };
         let text = if caption.is_empty() {

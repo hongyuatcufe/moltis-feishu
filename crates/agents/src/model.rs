@@ -211,6 +211,13 @@ pub fn values_to_chat_messages(values: &[serde_json::Value]) -> Vec<ChatMessage>
                                 "image_url" => {
                                     let url = block["image_url"]["url"].as_str()?;
                                     let (media_type, data) = parse_data_uri(url)?;
+                                    if !media_type.to_ascii_lowercase().starts_with("image/") {
+                                        tracing::warn!(
+                                            media_type,
+                                            "skipping non-image data URI in user multimodal content"
+                                        );
+                                        return None;
+                                    }
                                     Some(ContentPart::Image {
                                         media_type: media_type.to_string(),
                                         data: data.to_string(),
@@ -220,7 +227,13 @@ pub fn values_to_chat_messages(values: &[serde_json::Value]) -> Vec<ChatMessage>
                             }
                         })
                         .collect();
-                    messages.push(ChatMessage::user_multimodal(parts));
+                    if parts.is_empty() {
+                        messages.push(ChatMessage::user(
+                            "[Attachment omitted: unsupported non-image data URI]",
+                        ));
+                    } else {
+                        messages.push(ChatMessage::user_multimodal(parts));
+                    }
                 } else {
                     messages.push(ChatMessage::user(""));
                 }
@@ -598,6 +611,29 @@ mod tests {
         ];
         let msgs = values_to_chat_messages(&values);
         assert_eq!(msgs.len(), 1);
+    }
+
+    #[test]
+    fn convert_multimodal_non_image_data_uri_falls_back_to_text_notice() {
+        let values = vec![serde_json::json!({
+            "role": "user",
+            "content": [
+                {
+                    "type": "image_url",
+                    "image_url": {
+                        "url": "data:application/vnd.openxmlformats-officedocument.wordprocessingml.document;base64,SGVsbG8="
+                    }
+                }
+            ]
+        })];
+        let msgs = values_to_chat_messages(&values);
+        assert_eq!(msgs.len(), 1);
+        assert!(matches!(
+            &msgs[0],
+            ChatMessage::User {
+                content: UserContent::Text(t)
+            } if t == "[Attachment omitted: unsupported non-image data URI]"
+        ));
     }
 
     #[test]

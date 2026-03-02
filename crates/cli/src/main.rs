@@ -24,7 +24,7 @@ use {
     anyhow::anyhow,
     clap::{Parser, Subcommand},
     moltis_gateway::logs::{EnabledLogLevels, LogBroadcastLayer, LogBuffer},
-    tracing::info,
+    tracing::{info, warn},
     tracing_subscriber::{EnvFilter, fmt, layer::SubscriberExt, util::SubscriberInitExt},
 };
 
@@ -233,6 +233,15 @@ fn init_telemetry(cli: &Cli, log_buffer: Option<LogBuffer>) {
     }
 }
 
+fn install_rustls_crypto_provider() {
+    // rustls 0.23 can compile with multiple providers (ring/aws-lc-rs).
+    // Install a process-level default explicitly to avoid runtime panic.
+    let provider = rustls::crypto::ring::default_provider();
+    if provider.install_default().is_err() {
+        warn!("rustls CryptoProvider already installed, keeping existing default");
+    }
+}
+
 #[cfg(feature = "tls")]
 async fn trust_ca() -> anyhow::Result<()> {
     let cert_dir = moltis_gateway::tls::cert_dir()?;
@@ -310,6 +319,7 @@ async fn trust_ca() -> anyhow::Result<()> {
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     dotenvy::dotenv().ok();
+    install_rustls_crypto_provider();
     let cli = Cli::parse();
 
     // Create the log buffer only for the gateway command so the web UI can

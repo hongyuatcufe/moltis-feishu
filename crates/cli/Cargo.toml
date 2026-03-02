@@ -50,6 +50,7 @@ moltis-web             = { optional = true, workspace = true }
 open                   = { workspace = true }
 rand                   = { workspace = true }
 reqwest                = { workspace = true }
+rustls                 = { workspace = true }
 secrecy                = { workspace = true }
 serde_json             = { workspace = true }
 sqlx                   = { workspace = true }

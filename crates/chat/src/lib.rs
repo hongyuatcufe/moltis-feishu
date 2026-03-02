@@ -3883,6 +3883,11 @@ impl ChatService for LiveChatService {
             return Err("nothing to compact".into());
         }
 
+        let split_at = compact_split_index(history.len(), compact_keep_last_n())
+            .ok_or_else(|| ServiceError::message("nothing to compact"))?;
+        let summarize_history = &history[..split_at];
+        let recent_history = history[split_at..].to_vec();
+
         // Dispatch BeforeCompaction hook.
         if let Some(ref hooks) = self.hook_registry {
             let payload = moltis_common::hooks::HookPayload::BeforeCompaction {
@@ -3930,7 +3935,7 @@ impl ChatService for LiveChatService {
         let mut summary_messages = vec![ChatMessage::system(
             "You are a conversation summarizer. The messages that follow are a conversation you must summarize. Preserve all key facts, decisions, and context. After the conversation, you will receive a final instruction.",
         )];
-        summary_messages.extend(values_to_chat_messages(&history));
+        summary_messages.extend(values_to_chat_messages(summarize_history));
         summary_messages.push(ChatMessage::user(
             "Summarize the conversation above into a concise form. Output only the summary, no preamble.",
         ));
@@ -3987,14 +3992,17 @@ impl ChatService for LiveChatService {
             seq: None,
             run_id: None,
         };
-        let compacted = vec![compacted_msg.to_value()];
+        let mut compacted = vec![compacted_msg.to_value()];
+        compacted.extend(recent_history);
 
         self.session_store
             .replace_history(&session_key, compacted.clone())
             .await
             .map_err(ServiceError::message)?;
 
-        self.session_metadata.touch(&session_key, 1).await;
+        self.session_metadata
+            .touch(&session_key, compacted.len() as u32)
+            .await;
 
         // Save compaction summary to memory file and trigger sync.
         if let Some(mm) = self.state.memory_manager() {
@@ -6162,13 +6170,18 @@ async fn compact_session(
         return Err(error::Error::message("nothing to compact"));
     }
 
+    let split_at = compact_split_index(history.len(), compact_keep_last_n())
+        .ok_or_else(|| error::Error::message("nothing to compact"))?;
+    let summarize_history = &history[..split_at];
+    let recent_history = history[split_at..].to_vec();
+
     // Use structured ChatMessage objects so role boundaries are maintained via
     // the API's message structure, preventing prompt injection where user content
     // could mimic role prefixes in concatenated text.
     let mut summary_messages = vec![ChatMessage::system(
         "You are a conversation summarizer. The messages that follow are a conversation you must summarize. Preserve all key facts, decisions, and context. After the conversation, you will receive a final instruction.",
     )];
-    summary_messages.extend(values_to_chat_messages(&history));
+    summary_messages.extend(values_to_chat_messages(summarize_history));
     summary_messages.push(ChatMessage::user(
         "Summarize the conversation above into a concise form. Output only the summary, no preamble.",
     ));
@@ -6217,7 +6230,8 @@ async fn compact_session(
         seq: None,
         run_id: None,
     };
-    let compacted = vec![compacted_msg.to_value()];
+    let mut compacted = vec![compacted_msg.to_value()];
+    compacted.extend(recent_history);
 
     store
         .replace_history(session_key, compacted)
@@ -6243,6 +6257,23 @@ const STREAM_RETRYABLE_SERVER_PATTERNS: &[&str] = &[
     "connection reset",
 ];
 const STREAM_SERVER_RETRY_DELAY_MS: u64 = 2_000;
+const DEFAULT_COMPACT_KEEP_LAST_N: usize = 12;
+
+fn compact_keep_last_n() -> usize {
+    std::env::var("MOLTIS_COMPACT_KEEP_LAST_N")
+        .ok()
+        .and_then(|v| v.parse::<usize>().ok())
+        .filter(|v| *v > 0)
+        .unwrap_or(DEFAULT_COMPACT_KEEP_LAST_N)
+}
+
+fn compact_split_index(total_messages: usize, keep_last_n: usize) -> Option<usize> {
+    if total_messages <= 1 {
+        return None;
+    }
+    let capped_keep = keep_last_n.min(total_messages.saturating_sub(1));
+    Some(total_messages - capped_keep)
+}
 const STREAM_SERVER_MAX_RETRIES: u8 = 1;
 const STREAM_RATE_LIMIT_INITIAL_RETRY_MS: u64 = 2_000;
 const STREAM_RATE_LIMIT_MAX_RETRY_MS: u64 = 60_000;
@@ -7054,7 +7085,9 @@ async fn deliver_channel_replies_to_targets(
                         }
                     },
                 },
-                moltis_channels::ChannelType::MsTeams | moltis_channels::ChannelType::Whatsapp => {
+                moltis_channels::ChannelType::MsTeams
+                | moltis_channels::ChannelType::Feishu
+                | moltis_channels::ChannelType::Whatsapp => {
                     match tts_payload {
                         Some(payload) => {
                             if let Err(e) = outbound
@@ -7412,6 +7445,7 @@ async fn send_screenshot_to_channels(
             match target.channel_type {
                 moltis_channels::ChannelType::Telegram
                 | moltis_channels::ChannelType::MsTeams
+                | moltis_channels::ChannelType::Feishu
                 | moltis_channels::ChannelType::Whatsapp => {
                     let reply_to = target.message_id.as_deref();
                     if let Err(e) = outbound
@@ -7852,6 +7886,21 @@ mod tests {
         assert_eq!(estimate_text_tokens("a"), 1);
         assert_eq!(estimate_text_tokens("abcd"), 1);
         assert_eq!(estimate_text_tokens("abcde"), 2);
+    }
+
+    #[test]
+    fn compact_split_index_returns_none_for_empty_or_single_message() {
+        assert_eq!(compact_split_index(0, 12), None);
+        assert_eq!(compact_split_index(1, 12), None);
+        assert_eq!(compact_split_index(12, 12), Some(1));
+        assert_eq!(compact_split_index(8, 12), Some(1));
+    }
+
+    #[test]
+    fn compact_split_index_keeps_last_n_messages() {
+        assert_eq!(compact_split_index(13, 12), Some(1));
+        assert_eq!(compact_split_index(25, 12), Some(13));
+        assert_eq!(compact_split_index(5, 2), Some(3));
     }
 
     #[test]

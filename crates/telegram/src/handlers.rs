@@ -344,6 +344,7 @@ pub async fn handle_message_direct(
 
                 let attachment = ChannelAttachment {
                     media_type,
+                    original_name: None,
                     data: final_data,
                 };
                 // Use caption as text, or empty string if no caption

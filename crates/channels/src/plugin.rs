@@ -12,6 +12,7 @@ pub enum ChannelType {
     Whatsapp,
     #[serde(rename = "msteams")]
     MsTeams,
+    Feishu,
 }
 
 impl ChannelType {
@@ -21,6 +22,7 @@ impl ChannelType {
             Self::Telegram => "telegram",
             Self::Whatsapp => "whatsapp",
             Self::MsTeams => "msteams",
+            Self::Feishu => "feishu",
         }
     }
 
@@ -30,6 +32,7 @@ impl ChannelType {
             Self::Telegram => "Telegram",
             Self::Whatsapp => "WhatsApp",
             Self::MsTeams => "Microsoft Teams",
+            Self::Feishu => "Feishu",
         }
     }
 }
@@ -48,6 +51,7 @@ impl std::str::FromStr for ChannelType {
             "telegram" => Ok(Self::Telegram),
             "whatsapp" => Ok(Self::Whatsapp),
             "msteams" | "microsoft_teams" | "microsoft-teams" | "teams" => Ok(Self::MsTeams),
+            "feishu" | "lark" => Ok(Self::Feishu),
             other => Err(Error::invalid_input(format!(
                 "unknown channel type: {other}"
             ))),
@@ -249,6 +253,8 @@ pub enum ChannelMessageKind {
 pub struct ChannelAttachment {
     /// MIME type of the attachment (e.g., "image/jpeg", "image/png").
     pub media_type: String,
+    /// Original filename if provided by the channel platform.
+    pub original_name: Option<String>,
     /// Raw binary data of the attachment.
     pub data: Vec<u8>,
 }
@@ -488,6 +494,7 @@ mod tests {
             ChannelType::Telegram,
             ChannelType::Whatsapp,
             ChannelType::MsTeams,
+            ChannelType::Feishu,
         ] {
             let json = serde_json::to_string(&ct).unwrap();
             let parsed: ChannelType = serde_json::from_str(&json).unwrap();

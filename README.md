@@ -21,6 +21,28 @@ One binary — sandboxed, secure, yours.
 
 Moltis recently hit [the front page of Hacker News](https://news.ycombinator.com/item?id=46993587). Please [open an issue](https://github.com/moltis-org/moltis/issues) for any friction at all. I'm focused on making Moltis excellent.
 
+## Fork Note / 分支说明
+
+This fork is based on **moltis `v0.9.10`** (`v0.9.10-70-g2da20330`) and adds China-focused channel/tooling capabilities.
+
+本分支基于 **moltis `v0.9.10`**（`v0.9.10-70-g2da20330`），新增了面向中文场景的渠道与工具能力。
+
+### Implemented / 已实现
+
+- **Feishu channel integration (WebSocket long connection) / 飞书渠道接入（WebSocket 长连接）**: direct connect mode (no pairing), inbound/outbound text+file path.
+- **Feishu multi-agent workflow / 飞书多 Agent 工作流**: `/agent` switch + `/handoff` handoff flow (same/new/fork session modes).
+- **Feishu attachment pipeline / 飞书附件链路**: centralized blob storage + `original_name` propagation.
+- **Feishu voice flow / 飞书语音链路**: inbound voice download + STT handoff, outbound TTS audio with fallback to file message.
+- **`web_cn_search` tool / 中文搜索工具**: Metaso / Bocha / Anspire / Jina unified actions, per-provider key config, partial-failure tolerance.
+- **`web_read` tool / 网页精读工具**: fallback chain (Jina → Metaso → Crawl4AI → Pinchtab), independent config.
+- **Session lifecycle controls / 会话治理**: `/sessions archive N`, `/sessions unarchive N`, stale session auto-archive.
+
+### Config Example / 配置示例
+
+Use `examples/moltis.feishu-cn-tools.example.toml` as a starter template.
+
+请使用 `examples/moltis.feishu-cn-tools.example.toml` 作为起始配置模板。
+
 **Secure by design** — Your keys never leave your machine. Every command runs in a sandboxed container, never on your host.
 
 **Your hardware** — Runs on a Mac Mini, a Raspberry Pi, or any server you own. One Rust binary, no Node.js, no npm, no runtime.

@@ -151,6 +151,21 @@ fn build_schema_map() -> KnownKeys {
         ]))
     };
 
+    let api_key_entry = || {
+        Struct(HashMap::from([
+            ("name", Leaf),
+            ("api_key", Leaf),
+            ("enabled", Leaf),
+        ]))
+    };
+
+    let api_key_provider = || {
+        Struct(HashMap::from([
+            ("enabled", Leaf),
+            ("accounts", Array(Box::new(api_key_entry()))),
+        ]))
+    };
+
     let web_search = || {
         Struct(HashMap::from([
             ("enabled", Leaf),
@@ -172,6 +187,46 @@ fn build_schema_map() -> KnownKeys {
             ("cache_ttl_minutes", Leaf),
             ("max_redirects", Leaf),
             ("readability", Leaf),
+            ("ssrf_allowlist", Leaf),
+        ]))
+    };
+
+    let crawl4ai = || {
+        Struct(HashMap::from([
+            ("endpoint", Leaf),
+            ("api_token", Leaf),
+            ("timeout_seconds", Leaf),
+        ]))
+    };
+
+    let pinchtab = || {
+        Struct(HashMap::from([
+            ("endpoint", Leaf),
+            ("token", Leaf),
+            ("timeout_seconds", Leaf),
+        ]))
+    };
+
+    let web_cn_search = || {
+        Struct(HashMap::from([
+            ("enabled", Leaf),
+            ("metaso", api_key_provider()),
+            ("bocha", api_key_provider()),
+            ("anspire", api_key_provider()),
+            ("jina", api_key_provider()),
+            ("timeout_seconds", Leaf),
+        ]))
+    };
+
+    let web_read = || {
+        Struct(HashMap::from([
+            ("enabled", Leaf),
+            ("jina", api_key_provider()),
+            ("metaso", api_key_provider()),
+            ("crawl4ai", crawl4ai()),
+            ("pinchtab", pinchtab()),
+            ("min_chars", Leaf),
+            ("cache_ttl_minutes", Leaf),
             ("ssrf_allowlist", Leaf),
         ]))
     };
@@ -227,6 +282,8 @@ fn build_schema_map() -> KnownKeys {
                 Struct(HashMap::from([
                     ("search", web_search()),
                     ("fetch", web_fetch()),
+                    ("cn_search", web_cn_search()),
+                    ("read", web_read()),
                 ])),
             ),
             ("maps", Struct(HashMap::from([("provider", Leaf)]))),
@@ -333,6 +390,7 @@ fn build_schema_map() -> KnownKeys {
                 ("telegram", Map(Box::new(Leaf))),
                 ("whatsapp", Map(Box::new(Leaf))),
                 ("msteams", Map(Box::new(Leaf))),
+                ("feishu", Map(Box::new(Leaf))),
             ])),
         ),
         (

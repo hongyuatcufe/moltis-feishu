@@ -9,6 +9,7 @@ use {
 use {
     moltis_channels::{
         ChannelAttachment, ChannelEvent, ChannelEventSink, ChannelMessageMeta, ChannelReplyTarget,
+        ChannelType,
         Error as ChannelError, Result as ChannelResult,
     },
     moltis_sessions::metadata::SqliteSessionMetadata,
@@ -18,6 +19,68 @@ use crate::{
     broadcast::{BroadcastOpts, broadcast},
     state::GatewayState,
 };
+
+async fn channel_account_config(
+    state: &GatewayState,
+    reply_to: &ChannelReplyTarget,
+) -> Option<serde_json::Value> {
+    state
+        .services
+        .channel
+        .status()
+        .await
+        .ok()
+        .and_then(|v| v.get("channels").and_then(|c| c.as_array()).cloned())
+        .and_then(|channels| {
+            channels
+                .into_iter()
+                .find(|ch| {
+                    ch.get("type").and_then(|v| v.as_str())
+                        == Some(reply_to.channel_type.as_str())
+                        && ch.get("account_id").and_then(|v| v.as_str())
+                            == Some(reply_to.account_id.as_str())
+                })
+                .and_then(|ch| ch.get("config").cloned())
+        })
+}
+
+async fn channel_config_string(
+    state: &GatewayState,
+    reply_to: &ChannelReplyTarget,
+    key: &str,
+) -> Option<String> {
+    channel_account_config(state, reply_to)
+        .await
+        .and_then(|cfg| cfg.get(key).and_then(|v| v.as_str()).map(str::to_string))
+        .filter(|value| !value.trim().is_empty())
+}
+
+async fn channel_config_bool(
+    state: &GatewayState,
+    reply_to: &ChannelReplyTarget,
+    key: &str,
+) -> Option<bool> {
+    channel_account_config(state, reply_to)
+        .await
+        .and_then(|cfg| cfg.get(key).and_then(|v| v.as_bool()))
+}
+
+async fn channel_config_u64(
+    state: &GatewayState,
+    reply_to: &ChannelReplyTarget,
+    key: &str,
+) -> Option<u64> {
+    channel_account_config(state, reply_to)
+        .await
+        .and_then(|cfg| {
+            cfg.get(key).and_then(|v| {
+                v.as_u64().or_else(|| {
+                    v.as_str()
+                        .and_then(|raw| raw.trim().parse::<u64>().ok())
+                })
+            })
+        })
+}
 
 /// Default (deterministic) session key for a channel chat.
 fn default_channel_session_key(target: &ChannelReplyTarget) -> String {
@@ -47,6 +110,16 @@ async fn resolve_channel_session(
     default_channel_session_key(target)
 }
 
+async fn resolve_inbound_channel_session(
+    state: &GatewayState,
+    target: &ChannelReplyTarget,
+    metadata: &SqliteSessionMetadata,
+) -> String {
+    let session_key = resolve_channel_session(target, metadata).await;
+    let _ = auto_archive_stale_channel_sessions(state, metadata, target, &session_key).await;
+    session_key
+}
+
 fn slash_command_name(text: &str) -> Option<&str> {
     let rest = text.trim_start().strip_prefix('/')?;
     let cmd = rest.split_whitespace().next().unwrap_or("");
@@ -68,6 +141,7 @@ fn is_channel_control_command_name(cmd: &str) -> bool {
             | "sandbox"
             | "sessions"
             | "agent"
+            | "handoff"
             | "help"
             | "sh"
     )
@@ -86,6 +160,372 @@ fn rewrite_for_shell_mode(text: &str) -> Option<String> {
     }
 
     Some(format!("/sh {trimmed}"))
+}
+
+fn is_image_media_type(media_type: &str) -> bool {
+    media_type
+        .trim()
+        .to_ascii_lowercase()
+        .starts_with("image/")
+}
+
+fn attachment_placeholder_text(has_images: bool, has_non_images: bool) -> &'static str {
+    match (has_images, has_non_images) {
+        (true, true) => "[Image + Attachment]",
+        (true, false) => "[Image]",
+        (false, true) => "[Attachment]",
+        (false, false) => "",
+    }
+}
+
+async fn persist_non_image_attachments(
+    state: &GatewayState,
+    session_key: &str,
+    reply_to: &ChannelReplyTarget,
+    attachments: &[ChannelAttachment],
+) -> Vec<String> {
+    let Some(store) = state.services.attachment_store.clone() else {
+        return Vec::new();
+    };
+    let mut saved_paths = Vec::new();
+    for attachment in attachments {
+        if is_image_media_type(&attachment.media_type) {
+            continue;
+        }
+        let saved = store
+            .save_channel_attachment(crate::attachment_store::SaveChannelAttachment {
+                session_key,
+                channel_type: reply_to.channel_type.as_str(),
+                account_id: &reply_to.account_id,
+                chat_id: &reply_to.chat_id,
+                message_id: reply_to.message_id.as_deref(),
+                media_type: &attachment.media_type,
+                original_name: attachment.original_name.as_deref(),
+                data: &attachment.data,
+            })
+            .await;
+        match saved {
+            Ok(saved) => {
+                saved_paths.push(format!(
+                    "{} -> {} ({}, {} bytes)",
+                    saved.original_name,
+                    saved.absolute_path.display(),
+                    saved.media_type,
+                    saved.size_bytes
+                ));
+            }
+            Err(error) => {
+                warn!(
+                    session_key,
+                    media_type = %attachment.media_type,
+                    error = %error,
+                    "failed to persist non-image attachment"
+                );
+            }
+        }
+    }
+    saved_paths
+}
+
+fn normalize_selector(input: &str) -> String {
+    input.trim().to_ascii_lowercase()
+}
+
+fn resolve_agent_selector<'a>(
+    agents: &'a [crate::agent_persona::AgentPersona],
+    selector: &str,
+) -> ChannelResult<&'a crate::agent_persona::AgentPersona> {
+    let trimmed = selector.trim();
+    if trimmed.is_empty() {
+        return Err(ChannelError::invalid_input("missing agent id"));
+    }
+
+    let normalized = normalize_selector(trimmed);
+
+    let mut by_id = agents.iter().filter(|agent| agent.id == normalized);
+    if let Some(found) = by_id.next() {
+        return Ok(found);
+    }
+
+    Err(ChannelError::invalid_input(format!(
+        "unknown agent id: '{trimmed}'"
+    )))
+}
+
+const HANDOFF_NAMESPACE: &str = "handoff";
+const HANDOFF_PENDING_KEY: &str = "pending";
+const DEFAULT_AUTO_ARCHIVE_DAYS: u64 = 30;
+
+#[derive(Debug, Clone, Copy, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+enum HandoffMode {
+    SameSession,
+    NewSession,
+    ForkSession,
+}
+
+impl HandoffMode {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::SameSession => "same_session",
+            Self::NewSession => "new_session",
+            Self::ForkSession => "fork_session",
+        }
+    }
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+struct HandoffPacket {
+    version: u8,
+    mode: HandoffMode,
+    from_agent_id: String,
+    to_agent_id: String,
+    source_session_key: String,
+    target_session_key: String,
+    #[serde(default)]
+    note: String,
+    created_at_ms: u64,
+}
+
+fn parse_handoff_mode(value: &str) -> Option<HandoffMode> {
+    match value.trim().to_ascii_lowercase().as_str() {
+        "same_session" | "same" => Some(HandoffMode::SameSession),
+        "new_session" | "new" => Some(HandoffMode::NewSession),
+        "fork_session" | "fork" => Some(HandoffMode::ForkSession),
+        _ => None,
+    }
+}
+
+fn parse_handoff_args(args: &str) -> ChannelResult<(String, HandoffMode, String)> {
+    let mut tokens = args.split_whitespace().peekable();
+    let selector = tokens
+        .next()
+        .ok_or_else(|| ChannelError::invalid_input("usage: /handoff <agent_id> [note]"))?;
+
+    let mut mode = HandoffMode::SameSession;
+    let mut mode_explicit = false;
+    let mut note_parts = Vec::new();
+
+    while let Some(token) = tokens.next() {
+        if let Some(value) = token.strip_prefix("--mode=") {
+            let parsed = parse_handoff_mode(value).ok_or_else(|| {
+                ChannelError::invalid_input("invalid mode; use same_session|new_session|fork_session")
+            })?;
+            mode = parsed;
+            mode_explicit = true;
+            continue;
+        }
+        if token == "--mode" {
+            let value = tokens.next().ok_or_else(|| {
+                ChannelError::invalid_input("missing mode value after --mode")
+            })?;
+            let parsed = parse_handoff_mode(value).ok_or_else(|| {
+                ChannelError::invalid_input("invalid mode; use same_session|new_session|fork_session")
+            })?;
+            mode = parsed;
+            mode_explicit = true;
+            continue;
+        }
+        if token.starts_with("--") {
+            return Err(ChannelError::invalid_input(format!(
+                "unknown flag: {token}"
+            )));
+        }
+        if !mode_explicit
+            && let Some(parsed) = parse_handoff_mode(token)
+        {
+            mode = parsed;
+            mode_explicit = true;
+            continue;
+        }
+        note_parts.push(token);
+    }
+
+    Ok((
+        selector.to_string(),
+        mode,
+        note_parts.join(" ").trim().to_string(),
+    ))
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SessionsCommand {
+    List,
+    Switch(usize),
+    Archive(usize),
+    Unarchive(usize),
+}
+
+fn parse_sessions_command_args(args: &str) -> ChannelResult<SessionsCommand> {
+    let trimmed = args.trim();
+    if trimmed.is_empty() {
+        return Ok(SessionsCommand::List);
+    }
+
+    let mut parts = trimmed.split_whitespace();
+    let head = parts.next().unwrap_or_default();
+    match head {
+        "archive" | "unarchive" => {
+            let n_str = parts.next().ok_or_else(|| {
+                ChannelError::invalid_input(format!("usage: /sessions {head} <number>"))
+            })?;
+            if parts.next().is_some() {
+                return Err(ChannelError::invalid_input(format!(
+                    "usage: /sessions {head} <number>"
+                )));
+            }
+            let n = n_str.parse::<usize>().map_err(|_| {
+                ChannelError::invalid_input(format!("usage: /sessions {head} <number>"))
+            })?;
+            if n == 0 {
+                return Err(ChannelError::invalid_input("session number must be >= 1"));
+            }
+            if head == "archive" {
+                Ok(SessionsCommand::Archive(n))
+            } else {
+                Ok(SessionsCommand::Unarchive(n))
+            }
+        }
+        n_str => {
+            if parts.next().is_some() {
+                return Err(ChannelError::invalid_input(
+                    "usage: /sessions [number]|archive <number>|unarchive <number>",
+                ));
+            }
+            let n = n_str
+                .parse::<usize>()
+                .map_err(|_| ChannelError::invalid_input("usage: /sessions <number>"))?;
+            if n == 0 {
+                return Err(ChannelError::invalid_input("session number must be >= 1"));
+            }
+            Ok(SessionsCommand::Switch(n))
+        }
+    }
+}
+
+async fn current_agent_id_for_session(
+    state: &GatewayState,
+    session_metadata: &SqliteSessionMetadata,
+    session_key: &str,
+) -> String {
+    if let Some(agent_id) = session_metadata
+        .get(session_key)
+        .await
+        .and_then(|entry| entry.agent_id)
+        .map(|v| v.trim().to_string())
+        .filter(|v| !v.is_empty())
+    {
+        return agent_id;
+    }
+    if let Some(ref store) = state.services.agent_persona_store {
+        return store
+            .default_id()
+            .await
+            .unwrap_or_else(|_| "main".to_string());
+    }
+    "main".to_string()
+}
+
+async fn auto_archive_stale_channel_sessions(
+    state: &GatewayState,
+    session_metadata: &SqliteSessionMetadata,
+    reply_to: &ChannelReplyTarget,
+    current_session_key: &str,
+) -> usize {
+    let auto_archive_days =
+        channel_config_u64(state, reply_to, "session_auto_archive_days")
+            .await
+            .unwrap_or(DEFAULT_AUTO_ARCHIVE_DAYS);
+    if auto_archive_days == 0 {
+        return 0;
+    }
+
+    let now_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis() as u64;
+    let cutoff_ms = now_ms.saturating_sub(auto_archive_days.saturating_mul(86_400_000));
+
+    let sessions = session_metadata
+        .list_channel_sessions(
+            reply_to.channel_type.as_str(),
+            &reply_to.account_id,
+            &reply_to.chat_id,
+        )
+        .await;
+    let mut archived_count = 0;
+    for session in sessions {
+        if session.key == current_session_key || session.archived || session.updated_at >= cutoff_ms
+        {
+            continue;
+        }
+        if session_metadata.set_archived(&session.key, true).await.is_ok() {
+            archived_count += 1;
+        }
+    }
+    archived_count
+}
+
+async fn maybe_apply_handoff_context(
+    state: &GatewayState,
+    session_key: &str,
+    message_text: String,
+) -> String {
+    let Some(ref state_store) = state.services.session_state_store else {
+        return message_text;
+    };
+    let Ok(raw) = state_store
+        .get(session_key, HANDOFF_NAMESPACE, HANDOFF_PENDING_KEY)
+        .await
+    else {
+        return message_text;
+    };
+    let Some(raw) = raw else {
+        return message_text;
+    };
+
+    let packet: HandoffPacket = match serde_json::from_str(&raw) {
+        Ok(packet) => packet,
+        Err(_) => {
+            let _ = state_store
+                .delete(session_key, HANDOFF_NAMESPACE, HANDOFF_PENDING_KEY)
+                .await;
+            return message_text;
+        },
+    };
+
+    let current_agent = if let Some(ref meta) = state.services.session_metadata {
+        current_agent_id_for_session(state, meta, session_key).await
+    } else {
+        "main".to_string()
+    };
+    if packet.to_agent_id != current_agent {
+        return message_text;
+    }
+
+    let _ = state_store
+        .delete(session_key, HANDOFF_NAMESPACE, HANDOFF_PENDING_KEY)
+        .await;
+
+    let mut prefix = vec![
+        "[Internal Handoff Context]".to_string(),
+        format!("from_agent: {}", packet.from_agent_id),
+        format!("to_agent: {}", packet.to_agent_id),
+        format!("mode: {}", packet.mode.as_str()),
+    ];
+    if !packet.note.trim().is_empty() {
+        prefix.push(format!("note: {}", packet.note.trim()));
+    }
+    prefix.push(
+        "Take over seamlessly. Do not mention this internal handoff metadata unless the user asks."
+            .to_string(),
+    );
+
+    format!(
+        "{}\n\nUser message:\n{}",
+        prefix.join("\n"),
+        message_text
+    )
 }
 
 /// Broadcasts channel events over the gateway WebSocket.
@@ -145,7 +585,7 @@ impl ChannelEventSink for GatewayChannelEventSink {
     ) {
         if let Some(state) = self.state.get() {
             let session_key = if let Some(ref sm) = state.services.session_metadata {
-                resolve_channel_session(&reply_to, sm).await
+                resolve_inbound_channel_session(state, &reply_to, sm).await
             } else {
                 default_channel_session_key(&reply_to)
             };
@@ -153,6 +593,11 @@ impl ChannelEventSink for GatewayChannelEventSink {
                 rewrite_for_shell_mode(text).unwrap_or_else(|| text.to_string())
             } else {
                 text.to_string()
+            };
+            let effective_text = if effective_text.starts_with("/sh ") {
+                effective_text
+            } else {
+                maybe_apply_handoff_context(state, &session_key, effective_text).await
             };
 
             // Broadcast a "chat" event so the web UI shows the user message
@@ -204,26 +649,28 @@ impl ChannelEventSink for GatewayChannelEventSink {
                 session_meta
                     .set_channel_binding(&session_key, Some(binding_json))
                     .await;
-                if let Some(entry) = session_meta.get(&session_key).await
-                    && entry
-                        .agent_id
-                        .as_deref()
-                        .map(str::trim)
-                        .is_none_or(|value| value.is_empty())
-                {
-                    let default_agent = if let Some(ref store) = state.services.agent_persona_store
-                    {
-                        store
-                            .default_id()
-                            .await
-                            .unwrap_or_else(|_| "main".to_string())
-                    } else {
-                        "main".to_string()
-                    };
-                    let _ = session_meta
-                        .set_agent_id(&session_key, Some(&default_agent))
-                        .await;
-                }
+            if let Some(entry) = session_meta.get(&session_key).await
+                && entry
+                    .agent_id
+                    .as_deref()
+                    .map(str::trim)
+                    .is_none_or(|value| value.is_empty())
+            {
+                let channel_agent = channel_config_string(state, &reply_to, "agent_id").await;
+                let default_agent = if let Some(agent_id) = channel_agent {
+                    agent_id
+                } else if let Some(ref store) = state.services.agent_persona_store {
+                    store
+                        .default_id()
+                        .await
+                        .unwrap_or_else(|_| "main".to_string())
+                } else {
+                    "main".to_string()
+                };
+                let _ = session_meta
+                    .set_agent_id(&session_key, Some(&default_agent))
+                    .await;
+            }
             }
 
             let chat = state.chat().await;
@@ -404,7 +851,7 @@ impl ChannelEventSink for GatewayChannelEventSink {
             // cancel itself after this call returns.
 
             // Broadcast an event so the UI can update.
-            let channel_type: moltis_channels::ChannelType = match channel_type.parse() {
+            let channel_type: ChannelType = match channel_type.parse() {
                 Ok(ct) => ct,
                 Err(e) => {
                     warn!("request_disable_account: {e}");
@@ -470,7 +917,7 @@ impl ChannelEventSink for GatewayChannelEventSink {
     ) -> Option<String> {
         let state = self.state.get()?;
         let session_key = if let Some(ref sm) = state.services.session_metadata {
-            resolve_channel_session(reply_to, sm).await
+            resolve_inbound_channel_session(state, reply_to, sm).await
         } else {
             default_channel_session_key(reply_to)
         };
@@ -543,7 +990,7 @@ impl ChannelEventSink for GatewayChannelEventSink {
         };
 
         let session_key = if let Some(ref sm) = state.services.session_metadata {
-            resolve_channel_session(reply_to, sm).await
+            resolve_inbound_channel_session(state, reply_to, sm).await
         } else {
             default_channel_session_key(reply_to)
         };
@@ -602,24 +1049,68 @@ impl ChannelEventSink for GatewayChannelEventSink {
         };
 
         let session_key = if let Some(ref sm) = state.services.session_metadata {
-            resolve_channel_session(&reply_to, sm).await
+            resolve_inbound_channel_session(state, &reply_to, sm).await
         } else {
             default_channel_session_key(&reply_to)
         };
+        let saved_non_image_paths =
+            persist_non_image_attachments(state, &session_key, &reply_to, &attachments).await;
+
+        let mut non_image_types = Vec::new();
+        let has_images = attachments.iter().any(|attachment| {
+            let is_image = is_image_media_type(&attachment.media_type);
+            if !is_image {
+                non_image_types.push(attachment.media_type.clone());
+            }
+            is_image
+        });
+
+        // If there are no image attachments, downgrade to plain-text dispatch.
+        // This avoids sending multimodal payloads (content arrays) to providers
+        // that reject them when only non-image files are present.
+        if !has_images {
+            let mut fallback_text = text.trim().to_string();
+            if !non_image_types.is_empty() {
+                let kinds = non_image_types.join(", ");
+                let notice = format!(
+                    "[Attachment Notice] Non-image attachment MIME types: {kinds}. Ask the user for plain text content or a screenshot/image if visual parsing is needed."
+                );
+                if fallback_text.is_empty() {
+                    fallback_text = notice;
+                } else {
+                    fallback_text = format!("{fallback_text}\n\n{notice}");
+                }
+            }
+            if !saved_non_image_paths.is_empty() {
+                let saved = saved_non_image_paths.join("\n- ");
+                fallback_text = if fallback_text.is_empty() {
+                    format!(
+                        "[Attachment Saved]\n- {saved}\nUse these local paths directly when reading attachments."
+                    )
+                } else {
+                    format!(
+                        "{fallback_text}\n\n[Attachment Saved]\n- {saved}\nUse these local paths directly when reading attachments."
+                    )
+                };
+            }
+            self.dispatch_to_chat(&fallback_text, reply_to, meta).await;
+            return;
+        }
+        let mut dispatch_text =
+            maybe_apply_handoff_context(state, &session_key, text.to_string()).await;
 
         // Build multimodal content array (OpenAI format)
         let mut content_parts: Vec<serde_json::Value> = Vec::new();
+        let mut image_count = 0usize;
+        let mut skipped_types: Vec<String> = Vec::new();
 
-        // Add text part if not empty
-        if !text.is_empty() {
-            content_parts.push(serde_json::json!({
-                "type": "text",
-                "text": text,
-            }));
-        }
-
-        // Add image parts
+        // Add image parts. Non-image attachments are represented as a text hint
+        // to avoid sending invalid multimodal payloads to providers.
         for attachment in &attachments {
+            if !is_image_media_type(&attachment.media_type) {
+                skipped_types.push(attachment.media_type.clone());
+                continue;
+            }
             let base64_data = base64::Engine::encode(
                 &base64::engine::general_purpose::STANDARD,
                 &attachment.data,
@@ -631,12 +1122,50 @@ impl ChannelEventSink for GatewayChannelEventSink {
                     "url": data_uri,
                 },
             }));
+            image_count = image_count.saturating_add(1);
+        }
+
+        if !skipped_types.is_empty() {
+            let kinds = skipped_types.join(", ");
+            let mut notice = format!(
+                "[Attachment Notice] Non-image attachment MIME types: {kinds}. Ask the user for plain text content or a screenshot/image if visual parsing is needed."
+            );
+            if !saved_non_image_paths.is_empty() {
+                let saved = saved_non_image_paths.join("\n- ");
+                notice.push_str(&format!(
+                    "\n[Attachment Saved]\n- {saved}\nUse these local paths directly when reading attachments."
+                ));
+            }
+            if dispatch_text.trim().is_empty() {
+                dispatch_text = notice;
+            } else {
+                dispatch_text = format!("{dispatch_text}\n\n{notice}");
+            }
+        }
+
+        // Add text part if not empty.
+        if !dispatch_text.trim().is_empty() {
+            content_parts.push(serde_json::json!({
+                "type": "text",
+                "text": dispatch_text,
+            }));
+        }
+
+        if content_parts.is_empty() {
+            // Defensive fallback: should not happen, but avoid sending an empty
+            // multimodal content array downstream.
+            content_parts.push(serde_json::json!({
+                "type": "text",
+                "text": "[Attachment]",
+            }));
         }
 
         debug!(
             session_key = %session_key,
             text_len = text.len(),
             attachment_count = attachments.len(),
+            image_count,
+            skipped_attachment_count = skipped_types.len(),
             "dispatching multimodal message to chat"
         );
 
@@ -648,9 +1177,10 @@ impl ChannelEventSink for GatewayChannelEventSink {
         };
 
         // For the broadcast, just show the text portion
+        let placeholder = attachment_placeholder_text(image_count > 0, !skipped_types.is_empty());
         let payload = serde_json::json!({
             "state": "channel_user",
-            "text": if text.is_empty() { "[Image]" } else { text },
+            "text": if text.is_empty() { placeholder } else { text },
             "channel": &meta,
             "sessionKey": &session_key,
             "messageIndex": msg_index,
@@ -694,7 +1224,10 @@ impl ChannelEventSink for GatewayChannelEventSink {
                     .map(str::trim)
                     .is_none_or(|value| value.is_empty())
             {
-                let default_agent = if let Some(ref store) = state.services.agent_persona_store {
+                let channel_agent = channel_config_string(state, &reply_to, "agent_id").await;
+                let default_agent = if let Some(agent_id) = channel_agent {
+                    agent_id
+                } else if let Some(ref store) = state.services.agent_persona_store {
                     store
                         .default_id()
                         .await
@@ -893,7 +1426,10 @@ impl ChannelEventSink for GatewayChannelEventSink {
                     .map(str::trim)
                     .filter(|value| !value.is_empty())
                     .map(str::to_string);
+                let channel_agent = channel_config_string(state, &reply_to, "agent_id").await;
                 let target_agent = if let Some(agent_id) = inherited_agent {
+                    agent_id
+                } else if let Some(agent_id) = channel_agent {
                     agent_id
                 } else if let Some(ref store) = state.services.agent_persona_store {
                     store
@@ -1079,6 +1615,14 @@ impl ChannelEventSink for GatewayChannelEventSink {
                 ))
             },
             "sessions" => {
+                let auto_archived = auto_archive_stale_channel_sessions(
+                    state,
+                    session_metadata,
+                    &reply_to,
+                    &session_key,
+                )
+                .await;
+
                 let sessions = session_metadata
                     .list_channel_sessions(
                         reply_to.channel_type.as_str(),
@@ -1091,76 +1635,144 @@ impl ChannelEventSink for GatewayChannelEventSink {
                     return Ok("No sessions found. Send a message to start one.".to_string());
                 }
 
-                if args.is_empty() {
-                    // List mode.
-                    let mut lines = Vec::new();
-                    for (i, s) in sessions.iter().enumerate() {
-                        let label = s.label.as_deref().unwrap_or(&s.key);
-                        let marker = if s.key == session_key {
-                            " *"
-                        } else {
-                            ""
-                        };
-                        lines.push(format!(
-                            "{}. {} ({} msgs){}",
-                            i + 1,
-                            label,
-                            s.message_count,
-                            marker,
-                        ));
+                match parse_sessions_command_args(args)? {
+                    SessionsCommand::List => {
+                        let mut lines = Vec::new();
+                        for (i, s) in sessions.iter().enumerate() {
+                            let label = s.label.as_deref().unwrap_or(&s.key);
+                            let marker = if s.key == session_key {
+                                " *"
+                            } else {
+                                ""
+                            };
+                            let archived = if s.archived {
+                                " (archived)"
+                            } else {
+                                ""
+                            };
+                            lines.push(format!(
+                                "{}. {} ({} msgs){}{}",
+                                i + 1,
+                                label,
+                                s.message_count,
+                                archived,
+                                marker,
+                            ));
+                        }
+                        if auto_archived > 0 {
+                            lines.push(format!(
+                                "\nAuto-archived {auto_archived} stale session(s)."
+                            ));
+                        }
+                        lines.push("\nUse /sessions N to switch.".to_string());
+                        lines.push("Use /sessions archive N to archive a session.".to_string());
+                        lines.push("Use /sessions unarchive N to restore a session.".to_string());
+                        Ok(lines.join("\n"))
                     }
-                    lines.push("\nUse /sessions N to switch.".to_string());
-                    Ok(lines.join("\n"))
-                } else {
-                    // Switch mode.
-                    let n: usize = args
-                        .parse()
-                        .map_err(|_| ChannelError::invalid_input("usage: /sessions [number]"))?;
-                    if n == 0 || n > sessions.len() {
-                        return Err(ChannelError::invalid_input(format!(
-                            "invalid session number. Use 1–{}.",
-                            sessions.len()
-                        )));
+                    SessionsCommand::Archive(n) => {
+                        if n > sessions.len() {
+                            return Err(ChannelError::invalid_input(format!(
+                                "invalid session number. Use 1–{}.",
+                                sessions.len()
+                            )));
+                        }
+                        let target = &sessions[n - 1];
+                        if target.key == session_key {
+                            return Err(ChannelError::invalid_input(
+                                "cannot archive the currently active session",
+                            ));
+                        }
+                        if target.archived {
+                            return Ok("Session is already archived.".to_string());
+                        }
+                        session_metadata
+                            .set_archived(&target.key, true)
+                            .await
+                            .map_err(|e| ChannelError::external("archive session", e))?;
+                        let label = target.label.as_deref().unwrap_or(&target.key);
+                        Ok(format!("Archived: {label}"))
                     }
-                    let target_session = &sessions[n - 1];
+                    SessionsCommand::Unarchive(n) => {
+                        if n > sessions.len() {
+                            return Err(ChannelError::invalid_input(format!(
+                                "invalid session number. Use 1–{}.",
+                                sessions.len()
+                            )));
+                        }
+                        let target = &sessions[n - 1];
+                        if !target.archived {
+                            return Ok("Session is already active.".to_string());
+                        }
+                        session_metadata
+                            .set_archived(&target.key, false)
+                            .await
+                            .map_err(|e| ChannelError::external("unarchive session", e))?;
+                        let label = target.label.as_deref().unwrap_or(&target.key);
+                        Ok(format!("Unarchived: {label}"))
+                    }
+                    SessionsCommand::Switch(n) => {
+                        if n > sessions.len() {
+                            return Err(ChannelError::invalid_input(format!(
+                                "invalid session number. Use 1–{}.",
+                                sessions.len()
+                            )));
+                        }
+                        let target_session = &sessions[n - 1];
+                        if target_session.archived {
+                            return Err(ChannelError::invalid_input(
+                                "selected session is archived. Use /sessions unarchive N first.",
+                            ));
+                        }
 
-                    // Update forward mapping.
-                    session_metadata
-                        .set_active_session(
-                            reply_to.channel_type.as_str(),
-                            &reply_to.account_id,
-                            &reply_to.chat_id,
-                            &target_session.key,
+                        // Update forward mapping.
+                        session_metadata
+                            .set_active_session(
+                                reply_to.channel_type.as_str(),
+                                &reply_to.account_id,
+                                &reply_to.chat_id,
+                                &target_session.key,
+                            )
+                            .await;
+
+                        let label = target_session
+                            .label
+                            .as_deref()
+                            .unwrap_or(&target_session.key);
+                        info!(
+                            session = %target_session.key,
+                            "channel /sessions: switched session"
+                        );
+
+                        broadcast(
+                            state,
+                            "session",
+                            serde_json::json!({
+                                "kind": "switched",
+                                "sessionKey": &target_session.key,
+                            }),
+                            BroadcastOpts {
+                                drop_if_slow: true,
+                                ..Default::default()
+                            },
                         )
                         .await;
 
-                    let label = target_session
-                        .label
-                        .as_deref()
-                        .unwrap_or(&target_session.key);
-                    info!(
-                        session = %target_session.key,
-                        "channel /sessions: switched session"
-                    );
-
-                    broadcast(
-                        state,
-                        "session",
-                        serde_json::json!({
-                            "kind": "switched",
-                            "sessionKey": &target_session.key,
-                        }),
-                        BroadcastOpts {
-                            drop_if_slow: true,
-                            ..Default::default()
-                        },
-                    )
-                    .await;
-
-                    Ok(format!("Switched to: {label}"))
+                        Ok(format!("Switched to: {label}"))
+                    }
                 }
             },
             "agent" => {
+                if reply_to.channel_type == ChannelType::Feishu {
+                    let allow_switch =
+                        channel_config_bool(state, &reply_to, "allow_agent_switch")
+                            .await
+                            .unwrap_or(false);
+                    if !allow_switch {
+                        return Err(ChannelError::invalid_input(
+                            "agent switching is disabled for this bot",
+                        ));
+                    }
+                }
                 let Some(ref store) = state.services.agent_persona_store else {
                     return Err(ChannelError::unavailable(
                         "agent personas are not available",
@@ -1209,19 +1821,10 @@ impl ChannelEventSink for GatewayChannelEventSink {
                             marker,
                         ));
                     }
-                    lines.push("\nUse /agent N to switch.".to_string());
+                    lines.push("\nUse /agent <id> to switch.".to_string());
                     Ok(lines.join("\n"))
                 } else {
-                    let n: usize = args
-                        .parse()
-                        .map_err(|_| ChannelError::invalid_input("usage: /agent [number]"))?;
-                    if n == 0 || n > agents.len() {
-                        return Err(ChannelError::invalid_input(format!(
-                            "invalid agent number. Use 1–{}.",
-                            agents.len()
-                        )));
-                    }
-                    let chosen = &agents[n - 1];
+                    let chosen = resolve_agent_selector(&agents, args)?;
                     session_metadata
                         .set_agent_id(&session_key, Some(&chosen.id))
                         .await
@@ -1249,6 +1852,245 @@ impl ChannelEventSink for GatewayChannelEventSink {
                     }
                 }
             },
+            "handoff" => {
+                if reply_to.channel_type == ChannelType::Feishu {
+                    let allow_switch =
+                        channel_config_bool(state, &reply_to, "allow_agent_switch")
+                            .await
+                            .unwrap_or(false);
+                    if !allow_switch {
+                        return Err(ChannelError::invalid_input(
+                            "agent switching is disabled for this bot",
+                        ));
+                    }
+                }
+
+                let Some(ref store) = state.services.agent_persona_store else {
+                    return Err(ChannelError::unavailable(
+                        "agent personas are not available",
+                    ));
+                };
+
+                let default_id = store
+                    .default_id()
+                    .await
+                    .unwrap_or_else(|_| "main".to_string());
+                let agents = store
+                    .list()
+                    .await
+                    .map_err(|e| ChannelError::external("listing agents", e))?;
+                let current_agent = current_agent_id_for_session(state, session_metadata, &session_key).await;
+
+                if args.is_empty() {
+                    let mut lines = Vec::new();
+                    for (i, agent) in agents.iter().enumerate() {
+                        let marker = if agent.id == current_agent {
+                            " *"
+                        } else {
+                            ""
+                        };
+                        let default_badge = if agent.id == default_id {
+                            " (default)"
+                        } else {
+                            ""
+                        };
+                        lines.push(format!(
+                            "{}. {} [{}]{}{}",
+                            i + 1,
+                            agent.name,
+                            agent.id,
+                            default_badge,
+                            marker,
+                        ));
+                    }
+                    lines.push(
+                        "\nUse /handoff <id> [--mode same_session|new_session|fork_session] [note]"
+                            .to_string(),
+                    );
+                    return Ok(lines.join("\n"));
+                }
+
+                let (selector, mode, note) = parse_handoff_args(args)?;
+                let chosen = resolve_agent_selector(&agents, &selector)?;
+                let mut target_session_key = session_key.clone();
+                let source_session_key = session_key.clone();
+
+                match mode {
+                    HandoffMode::SameSession => {
+                        session_metadata
+                            .set_agent_id(&session_key, Some(&chosen.id))
+                            .await
+                            .map_err(|e| ChannelError::external("setting session agent", e))?;
+
+                        broadcast(
+                            state,
+                            "session",
+                            serde_json::json!({
+                                "kind": "patched",
+                                "sessionKey": &session_key,
+                            }),
+                            BroadcastOpts {
+                                drop_if_slow: true,
+                                ..Default::default()
+                            },
+                        )
+                        .await;
+                    }
+                    HandoffMode::NewSession => {
+                        let new_key = format!("session:{}", uuid::Uuid::new_v4());
+                        let binding_json = serde_json::to_string(&reply_to)
+                            .map_err(|e| ChannelError::external("serialize channel binding", e))?;
+                        let n = session_metadata
+                            .list_channel_sessions(
+                                reply_to.channel_type.as_str(),
+                                &reply_to.account_id,
+                                &reply_to.chat_id,
+                            )
+                            .await
+                            .len()
+                            + 1;
+                        session_metadata
+                            .upsert(
+                                &new_key,
+                                Some(format!("{} {n}", reply_to.channel_type.display_name())),
+                            )
+                            .await
+                            .map_err(|e| ChannelError::external("create handoff session", e))?;
+                        session_metadata
+                            .set_channel_binding(&new_key, Some(binding_json))
+                            .await;
+                        if let Some(source_entry) = session_metadata.get(&session_key).await {
+                            if source_entry.model.is_some() {
+                                session_metadata.set_model(&new_key, source_entry.model).await;
+                            }
+                            if source_entry.project_id.is_some() {
+                                session_metadata
+                                    .set_project_id(&new_key, source_entry.project_id)
+                                    .await;
+                            }
+                            if source_entry.mcp_disabled.is_some() {
+                                session_metadata
+                                    .set_mcp_disabled(&new_key, source_entry.mcp_disabled)
+                                    .await;
+                            }
+                        }
+                        session_metadata
+                            .set_agent_id(&new_key, Some(&chosen.id))
+                            .await
+                            .map_err(|e| ChannelError::external("setting handoff agent", e))?;
+                        session_metadata
+                            .set_active_session(
+                                reply_to.channel_type.as_str(),
+                                &reply_to.account_id,
+                                &reply_to.chat_id,
+                                &new_key,
+                            )
+                            .await;
+
+                        broadcast(
+                            state,
+                            "session",
+                            serde_json::json!({
+                                "kind": "created",
+                                "sessionKey": &new_key,
+                            }),
+                            BroadcastOpts {
+                                drop_if_slow: true,
+                                ..Default::default()
+                            },
+                        )
+                        .await;
+                        target_session_key = new_key;
+                    }
+                    HandoffMode::ForkSession => {
+                        let forked = state
+                            .services
+                            .session
+                            .fork(serde_json::json!({
+                                "key": &session_key,
+                            }))
+                            .await
+                            .map_err(ChannelError::unavailable)?;
+                        let new_key = forked
+                            .get("sessionKey")
+                            .and_then(|v| v.as_str())
+                            .ok_or_else(|| {
+                                ChannelError::unavailable(
+                                    "session fork did not return sessionKey",
+                                )
+                            })?
+                            .to_string();
+
+                        if let Ok(binding_json) = serde_json::to_string(&reply_to) {
+                            session_metadata
+                                .set_channel_binding(&new_key, Some(binding_json))
+                                .await;
+                        }
+                        session_metadata
+                            .set_agent_id(&new_key, Some(&chosen.id))
+                            .await
+                            .map_err(|e| ChannelError::external("setting handoff agent", e))?;
+                        session_metadata
+                            .set_active_session(
+                                reply_to.channel_type.as_str(),
+                                &reply_to.account_id,
+                                &reply_to.chat_id,
+                                &new_key,
+                            )
+                            .await;
+
+                        broadcast(
+                            state,
+                            "session",
+                            serde_json::json!({
+                                "kind": "created",
+                                "sessionKey": &new_key,
+                            }),
+                            BroadcastOpts {
+                                drop_if_slow: true,
+                                ..Default::default()
+                            },
+                        )
+                        .await;
+                        target_session_key = new_key;
+                    }
+                }
+
+                if let Some(ref state_store) = state.services.session_state_store {
+                    let packet = HandoffPacket {
+                        version: 1,
+                        mode,
+                        from_agent_id: current_agent.clone(),
+                        to_agent_id: chosen.id.clone(),
+                        source_session_key: source_session_key.clone(),
+                        target_session_key: target_session_key.clone(),
+                        note: note.clone(),
+                        created_at_ms: std::time::SystemTime::now()
+                            .duration_since(std::time::UNIX_EPOCH)
+                            .unwrap_or_default()
+                            .as_millis() as u64,
+                    };
+                    if let Ok(payload) = serde_json::to_string(&packet) {
+                        let _ = state_store
+                            .set(&target_session_key, HANDOFF_NAMESPACE, HANDOFF_PENDING_KEY, &payload)
+                            .await;
+                    }
+                }
+
+                let note_suffix = if note.is_empty() {
+                    String::new()
+                } else {
+                    format!("\nNote: {note}")
+                };
+                Ok(format!(
+                    "Handoff to {} [{}] via {}. Session: {}{}",
+                    chosen.name,
+                    chosen.id,
+                    mode.as_str(),
+                    target_session_key,
+                    note_suffix
+                ))
+            }
             "model" => {
                 let models_val = state
                     .services
@@ -1680,5 +2522,100 @@ mod tests {
     fn shell_mode_rewrite_skips_control_commands() {
         assert!(rewrite_for_shell_mode("/context").is_none());
         assert!(rewrite_for_shell_mode("/sh uname -a").is_none());
+        assert!(rewrite_for_shell_mode("/handoff writer").is_none());
+    }
+
+    #[test]
+    fn attachment_media_type_classification() {
+        assert!(is_image_media_type("image/png"));
+        assert!(is_image_media_type(" IMAGE/JPEG "));
+        assert!(!is_image_media_type(
+            "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+        ));
+    }
+
+    #[test]
+    fn attachment_placeholder_selection() {
+        assert_eq!(attachment_placeholder_text(true, false), "[Image]");
+        assert_eq!(attachment_placeholder_text(false, true), "[Attachment]");
+        assert_eq!(
+            attachment_placeholder_text(true, true),
+            "[Image + Attachment]"
+        );
+        assert_eq!(attachment_placeholder_text(false, false), "");
+    }
+
+    #[test]
+    fn resolve_agent_selector_supports_id_only() {
+        let agents = vec![
+            crate::agent_persona::AgentPersona {
+                id: "main".into(),
+                name: "Bob".into(),
+                is_default: true,
+                aliases: vec![],
+                emoji: None,
+                theme: None,
+                description: None,
+                created_at: 0,
+                updated_at: 0,
+            },
+            crate::agent_persona::AgentPersona {
+                id: "writer".into(),
+                name: "Writer".into(),
+                is_default: false,
+                aliases: vec!["alice".into()],
+                emoji: None,
+                theme: None,
+                description: None,
+                created_at: 0,
+                updated_at: 0,
+            },
+        ];
+
+        assert_eq!(resolve_agent_selector(&agents, "writer").unwrap().id, "writer");
+        assert_eq!(resolve_agent_selector(&agents, "WRITER").unwrap().id, "writer");
+        assert!(resolve_agent_selector(&agents, "2").is_err());
+        assert!(resolve_agent_selector(&agents, "alice").is_err());
+        assert!(resolve_agent_selector(&agents, "Bob").is_err());
+    }
+
+    #[test]
+    fn parse_handoff_args_supports_mode_and_note() {
+        let (selector, mode, note) =
+            parse_handoff_args("alice --mode fork_session focus on marketing").unwrap();
+        assert_eq!(selector, "alice");
+        assert_eq!(mode, HandoffMode::ForkSession);
+        assert_eq!(note, "focus on marketing");
+
+        let (_, mode2, note2) = parse_handoff_args("writer new_session").unwrap();
+        assert_eq!(mode2, HandoffMode::NewSession);
+        assert_eq!(note2, "");
+    }
+
+    #[test]
+    fn parse_sessions_command_args_supports_all_variants() {
+        assert_eq!(
+            parse_sessions_command_args("").unwrap(),
+            SessionsCommand::List
+        );
+        assert_eq!(
+            parse_sessions_command_args("3").unwrap(),
+            SessionsCommand::Switch(3)
+        );
+        assert_eq!(
+            parse_sessions_command_args("archive 2").unwrap(),
+            SessionsCommand::Archive(2)
+        );
+        assert_eq!(
+            parse_sessions_command_args("unarchive 5").unwrap(),
+            SessionsCommand::Unarchive(5)
+        );
+    }
+
+    #[test]
+    fn parse_sessions_command_args_rejects_invalid_inputs() {
+        assert!(parse_sessions_command_args("archive").is_err());
+        assert!(parse_sessions_command_args("unarchive 0").is_err());
+        assert!(parse_sessions_command_args("2 extra").is_err());
     }
 }
