@@ -1011,16 +1011,18 @@ struct PromptPersona {
     memory_text: Option<String>,
 }
 
-fn resolve_prompt_agent_id(session_entry: Option<&SessionEntry>) -> String {
+const AGENT_MODE_ATTACHED: &str = "attached";
+const AGENT_MODE_EPHEMERAL: &str = "ephemeral";
+
+fn resolve_known_agent_id(
+    session_entry: Option<&SessionEntry>,
+    raw_agent_id: Option<&str>,
+    field_name: &str,
+) -> String {
     let Some(entry) = session_entry else {
         return "main".to_string();
     };
-    let Some(agent_id) = entry
-        .agent_id
-        .as_deref()
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-    else {
+    let Some(agent_id) = raw_agent_id.map(str::trim).filter(|value| !value.is_empty()) else {
         return "main".to_string();
     };
     if agent_id == "main" {
@@ -1032,16 +1034,57 @@ fn resolve_prompt_agent_id(session_entry: Option<&SessionEntry>) -> String {
     warn!(
         session = %entry.key,
         agent_id,
-        "session references unknown agent workspace, falling back to main prompt persona"
+        field = field_name,
+        "session references unknown agent workspace, falling back to main"
     );
     "main".to_string()
+}
+
+fn resolve_prompt_agent_id(session_entry: Option<&SessionEntry>) -> String {
+    resolve_known_agent_id(
+        session_entry,
+        session_entry.and_then(|entry| entry.agent_id.as_deref()),
+        "agent_id",
+    )
+}
+
+fn resolve_memory_owner_agent_id(session_entry: Option<&SessionEntry>) -> String {
+    if let Some(entry) = session_entry
+        && entry
+            .memory_owner_agent_id
+            .as_deref()
+            .map(str::trim)
+            .is_none_or(|value| value.is_empty())
+    {
+        return resolve_prompt_agent_id(session_entry);
+    }
+    resolve_known_agent_id(
+        session_entry,
+        session_entry.and_then(|entry| entry.memory_owner_agent_id.as_deref()),
+        "memory_owner_agent_id",
+    )
+}
+
+fn resolve_session_agent_mode(session_entry: Option<&SessionEntry>) -> &'static str {
+    let active = resolve_prompt_agent_id(session_entry);
+    let memory_owner = resolve_memory_owner_agent_id(session_entry);
+    match session_entry
+        .and_then(|entry| entry.agent_mode.as_deref())
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        Some(AGENT_MODE_ATTACHED) => AGENT_MODE_ATTACHED,
+        Some(AGENT_MODE_EPHEMERAL) => AGENT_MODE_EPHEMERAL,
+        _ if active == memory_owner => AGENT_MODE_ATTACHED,
+        _ => AGENT_MODE_EPHEMERAL,
+    }
 }
 
 /// Load identity, user profile, soul, and workspace text for one agent.
 ///
 /// Both `run_with_tools` and `run_streaming` need the same persona data;
 /// this function avoids duplicating the merge logic.
-fn load_prompt_persona_for_agent(agent_id: &str) -> PromptPersona {
+fn load_prompt_persona_for_agent(agent_id: &str, memory_owner_agent_id: &str) -> PromptPersona {
     let config = moltis_config::discover_and_load();
     let mut identity = config.identity.clone();
     if let Some(file_identity) = moltis_config::load_identity_for_agent(agent_id) {
@@ -1071,13 +1114,14 @@ fn load_prompt_persona_for_agent(agent_id: &str) -> PromptPersona {
         soul_text: moltis_config::load_soul_for_agent(agent_id),
         agents_text: moltis_config::load_agents_md_for_agent(agent_id),
         tools_text: moltis_config::load_tools_md_for_agent(agent_id),
-        memory_text: moltis_config::load_memory_md_for_agent(agent_id),
+        memory_text: moltis_config::load_memory_md_for_agent(memory_owner_agent_id),
     }
 }
 
 fn load_prompt_persona_for_session(session_entry: Option<&SessionEntry>) -> PromptPersona {
     let agent_id = resolve_prompt_agent_id(session_entry);
-    load_prompt_persona_for_agent(&agent_id)
+    let memory_owner_agent_id = resolve_memory_owner_agent_id(session_entry);
+    load_prompt_persona_for_agent(&agent_id, &memory_owner_agent_id)
 }
 
 async fn build_prompt_runtime_context(
@@ -3060,6 +3104,10 @@ impl ChatService for LiveChatService {
         // per-session sandbox override details for prompt runtime context.
         let session_entry = self.session_metadata.get(&session_key).await;
         let session_agent_id = resolve_prompt_agent_id(session_entry.as_ref());
+        let session_memory_owner_agent_id =
+            resolve_memory_owner_agent_id(session_entry.as_ref());
+        let session_agent_mode = resolve_session_agent_mode(session_entry.as_ref());
+        let allow_memory_write = session_agent_mode == AGENT_MODE_ATTACHED;
         let mcp_disabled = session_entry
             .as_ref()
             .and_then(|entry| entry.mcp_disabled)
@@ -3114,6 +3162,7 @@ impl ChatService for LiveChatService {
         let session_store = Arc::clone(&self.session_store);
         let session_metadata = Arc::clone(&self.session_metadata);
         let session_agent_id_clone = session_agent_id.clone();
+        let session_memory_owner_agent_id_clone = session_memory_owner_agent_id.clone();
         let session_key_clone = session_key.clone();
         let accept_language = params
             .get("_accept_language")
@@ -3311,6 +3360,7 @@ impl ChatService for LiveChatService {
                         &history,
                         &session_key_clone,
                         &session_agent_id_clone,
+                        &session_memory_owner_agent_id_clone,
                         desired_reply_medium,
                         ctx_ref,
                         user_message_index,
@@ -3333,6 +3383,8 @@ impl ChatService for LiveChatService {
                         &history,
                         &session_key_clone,
                         &session_agent_id_clone,
+                        &session_memory_owner_agent_id_clone,
+                        allow_memory_write,
                         desired_reply_medium,
                         ctx_ref,
                         Some(&runtime_context),
@@ -3563,6 +3615,10 @@ impl ChatService for LiveChatService {
 
         let session_entry = self.session_metadata.get(&session_key).await;
         let session_agent_id = resolve_prompt_agent_id(session_entry.as_ref());
+        let session_memory_owner_agent_id =
+            resolve_memory_owner_agent_id(session_entry.as_ref());
+        let allow_memory_write =
+            resolve_session_agent_mode(session_entry.as_ref()) == AGENT_MODE_ATTACHED;
         let mut runtime_context = build_prompt_runtime_context(
             &self.state,
             &provider,
@@ -3629,6 +3685,7 @@ impl ChatService for LiveChatService {
                 &history,
                 &session_key,
                 &session_agent_id,
+                &session_memory_owner_agent_id,
                 desired_reply_medium,
                 None,
                 user_message_index,
@@ -3651,6 +3708,8 @@ impl ChatService for LiveChatService {
                 &history,
                 &session_key,
                 &session_agent_id,
+                &session_memory_owner_agent_id,
+                allow_memory_write,
                 desired_reply_medium,
                 None,
                 Some(&runtime_context),
@@ -3871,7 +3930,9 @@ impl ChatService for LiveChatService {
             self.session_key_for(conn_id.as_deref()).await
         };
         let session_entry = self.session_metadata.get(&session_key).await;
-        let session_agent_id = resolve_prompt_agent_id(session_entry.as_ref());
+        let memory_owner_agent_id = resolve_memory_owner_agent_id(session_entry.as_ref());
+        let allow_memory_write =
+            resolve_session_agent_mode(session_entry.as_ref()) == AGENT_MODE_ATTACHED;
 
         let history = self
             .session_store
@@ -3902,12 +3963,13 @@ impl ChatService for LiveChatService {
         // Run silent memory turn before summarization — saves important memories to disk.
         // The manager implements MemoryWriter directly (with path validation, size limits,
         // and automatic re-indexing), so no manual sync_path is needed after the turn.
-        if let Some(mm) = self.state.memory_manager()
+        if allow_memory_write
+            && let Some(mm) = self.state.memory_manager()
             && let Ok(provider) = self.resolve_provider(&session_key, &history).await
         {
             let chat_history_for_memory = values_to_chat_messages(&history);
             let writer: Arc<dyn moltis_agents::memory_writer::MemoryWriter> = Arc::new(
-                AgentScopedMemoryWriter::new(Arc::clone(mm), session_agent_id.clone()),
+                AgentScopedMemoryWriter::new(Arc::clone(mm), memory_owner_agent_id.clone()),
             );
             match moltis_agents::silent_turn::run_silent_memory_turn(
                 provider,
@@ -4005,8 +4067,8 @@ impl ChatService for LiveChatService {
             .await;
 
         // Save compaction summary to memory file and trigger sync.
-        if let Some(mm) = self.state.memory_manager() {
-            let memory_dir = moltis_config::agent_workspace_dir(&session_agent_id).join("memory");
+        if allow_memory_write && let Some(mm) = self.state.memory_manager() {
+            let memory_dir = moltis_config::agent_workspace_dir(&memory_owner_agent_id).join("memory");
             if let Err(e) = tokio::fs::create_dir_all(&memory_dir).await {
                 warn!(error = %e, "compact: failed to create memory dir");
             } else {
@@ -5410,6 +5472,7 @@ fn install_agent_scoped_memory_tools(
     registry: &mut ToolRegistry,
     manager: &Arc<moltis_memory::manager::MemoryManager>,
     agent_id: &str,
+    allow_save: bool,
 ) {
     let had_search = registry.unregister("memory_search");
     let had_get = registry.unregister("memory_get");
@@ -5428,7 +5491,7 @@ fn install_agent_scoped_memory_tools(
             agent_id_owned.clone(),
         )));
     }
-    if had_save {
+    if had_save && allow_save {
         registry.register(Box::new(AgentScopedMemorySaveTool::new(
             Arc::clone(manager),
             agent_id_owned,
@@ -5448,6 +5511,8 @@ async fn run_with_tools(
     history_raw: &[Value],
     session_key: &str,
     agent_id: &str,
+    memory_owner_agent_id: &str,
+    allow_memory_write: bool,
     desired_reply_medium: ReplyMedium,
     project_context: Option<&str>,
     runtime_context: Option<&PromptRuntimeContext>,
@@ -5462,7 +5527,7 @@ async fn run_with_tools(
     active_thinking_text: Option<Arc<RwLock<HashMap<String, String>>>>,
 ) -> Option<AssistantTurnOutput> {
     let run_started = Instant::now();
-    let persona = load_prompt_persona_for_agent(agent_id);
+    let persona = load_prompt_persona_for_agent(agent_id, memory_owner_agent_id);
 
     let native_tools = provider.supports_tools();
 
@@ -5475,7 +5540,12 @@ async fn run_with_tools(
         }
     };
     if native_tools && let Some(manager) = state.memory_manager() {
-        install_agent_scoped_memory_tools(&mut filtered_registry, manager, agent_id);
+        install_agent_scoped_memory_tools(
+            &mut filtered_registry,
+            manager,
+            memory_owner_agent_id,
+            allow_memory_write,
+        );
     }
 
     // Use a minimal prompt without tool schemas for providers that don't support tools.
@@ -6341,6 +6411,7 @@ async fn run_streaming(
     history_raw: &[Value],
     session_key: &str,
     agent_id: &str,
+    memory_owner_agent_id: &str,
     desired_reply_medium: ReplyMedium,
     project_context: Option<&str>,
     user_message_index: usize,
@@ -6350,7 +6421,7 @@ async fn run_streaming(
     client_seq: Option<u64>,
 ) -> Option<AssistantTurnOutput> {
     let run_started = Instant::now();
-    let persona = load_prompt_persona_for_agent(agent_id);
+    let persona = load_prompt_persona_for_agent(agent_id, memory_owner_agent_id);
 
     let system_prompt = build_system_prompt_minimal_runtime(
         project_context,
@@ -7569,6 +7640,33 @@ mod tests {
         id: String,
     }
 
+    fn test_session_entry() -> SessionEntry {
+        SessionEntry {
+            id: "id-1".to_string(),
+            key: "session:test".to_string(),
+            label: Some("Test".to_string()),
+            model: None,
+            created_at: 0,
+            updated_at: 0,
+            message_count: 0,
+            last_seen_message_count: 0,
+            project_id: None,
+            archived: false,
+            worktree_branch: None,
+            sandbox_enabled: None,
+            sandbox_image: None,
+            channel_binding: None,
+            parent_session_key: None,
+            fork_point: None,
+            mcp_disabled: None,
+            preview: None,
+            agent_id: Some("writer".to_string()),
+            memory_owner_agent_id: Some("main".to_string()),
+            agent_mode: Some(AGENT_MODE_EPHEMERAL.to_string()),
+            version: 0,
+        }
+    }
+
     #[async_trait]
     impl LlmProvider for StaticProvider {
         fn name(&self) -> &str {
@@ -7612,6 +7710,14 @@ mod tests {
         async fn execute(&self, _params: Value) -> Result<Value> {
             Ok(serde_json::json!({}))
         }
+    }
+
+    #[test]
+    fn session_agent_helpers_split_persona_from_memory_owner() {
+        let entry = test_session_entry();
+        assert_eq!(resolve_prompt_agent_id(Some(&entry)), "writer");
+        assert_eq!(resolve_memory_owner_agent_id(Some(&entry)), "main");
+        assert_eq!(resolve_session_agent_mode(Some(&entry)), AGENT_MODE_EPHEMERAL);
     }
 
     #[async_trait]

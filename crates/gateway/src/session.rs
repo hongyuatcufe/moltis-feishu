@@ -33,6 +33,8 @@ const SHARE_BOUNDARY_NOTICE: &str =
 const SHARE_PREVIEW_MAX_IMAGE_WIDTH: u32 = 430;
 const SHARE_PREVIEW_MAX_IMAGE_HEIGHT: u32 = 430;
 const SHARE_REDACTED_VALUE: &str = "[REDACTED]";
+const AGENT_MODE_ATTACHED: &str = "attached";
+const AGENT_MODE_EPHEMERAL: &str = "ephemeral";
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -908,26 +910,107 @@ impl LiveSessionService {
         fallback
     }
 
+    async fn resolve_memory_owner_agent_id_for_entry(
+        &self,
+        entry: &moltis_sessions::metadata::SessionEntry,
+        patch_if_invalid: bool,
+    ) -> String {
+        let fallback = self.default_agent_id().await;
+        let Some(agent_id) = entry
+            .memory_owner_agent_id
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+        else {
+            let active = self.resolve_agent_id_for_entry(entry, patch_if_invalid).await;
+            if patch_if_invalid {
+                let _ = self
+                    .metadata
+                    .set_memory_owner_agent_id(&entry.key, Some(&active))
+                    .await;
+            }
+            return active;
+        };
+
+        if agent_id == "main" {
+            return "main".to_string();
+        }
+
+        if let Some(ref store) = self.agent_persona_store {
+            match store.get(agent_id).await {
+                Ok(Some(_)) => return agent_id.to_string(),
+                Ok(None) => {
+                    warn!(
+                        session = %entry.key,
+                        memory_owner_agent_id = agent_id,
+                        fallback = %fallback,
+                        "session references unknown memory owner agent, falling back to default"
+                    );
+                },
+                Err(error) => {
+                    warn!(
+                        session = %entry.key,
+                        memory_owner_agent_id = agent_id,
+                        fallback = %fallback,
+                        %error,
+                        "failed to resolve session memory owner agent, falling back to default"
+                    );
+                },
+            }
+        } else {
+            return agent_id.to_string();
+        }
+
+        if patch_if_invalid {
+            let _ = self
+                .metadata
+                .set_memory_owner_agent_id(&entry.key, Some(&fallback))
+                .await;
+        }
+        fallback
+    }
+
+    async fn resolve_agent_mode_for_entry(
+        &self,
+        entry: &moltis_sessions::metadata::SessionEntry,
+        patch_if_invalid: bool,
+    ) -> String {
+        let active_agent = self.resolve_agent_id_for_entry(entry, patch_if_invalid).await;
+        let memory_owner = self
+            .resolve_memory_owner_agent_id_for_entry(entry, patch_if_invalid)
+            .await;
+        let mode = entry
+            .agent_mode
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .unwrap_or_else(|| {
+                if active_agent == memory_owner {
+                    AGENT_MODE_ATTACHED
+                } else {
+                    AGENT_MODE_EPHEMERAL
+                }
+            });
+        if !matches!(mode, AGENT_MODE_ATTACHED | AGENT_MODE_EPHEMERAL) {
+            let fallback = if active_agent == memory_owner {
+                AGENT_MODE_ATTACHED
+            } else {
+                AGENT_MODE_EPHEMERAL
+            };
+            if patch_if_invalid {
+                let _ = self.metadata.set_agent_mode(&entry.key, Some(fallback)).await;
+            }
+            return fallback.to_string();
+        }
+        mode.to_string()
+    }
+
     async fn ensure_entry_agent_id(
         &self,
         key: &str,
         inherit_from_key: Option<&str>,
     ) -> Option<moltis_sessions::metadata::SessionEntry> {
         let entry = self.metadata.get(key).await?;
-        if entry
-            .agent_id
-            .as_deref()
-            .is_some_and(|id| !id.trim().is_empty())
-        {
-            let effective = self.resolve_agent_id_for_entry(&entry, true).await;
-            if entry.agent_id.as_deref() == Some(effective.as_str()) {
-                return Some(entry);
-            }
-            let mut updated = entry;
-            updated.agent_id = Some(effective);
-            return Some(updated);
-        }
-
         let fallback = if let Some(parent_key) = inherit_from_key {
             if let Some(parent) = self.metadata.get(parent_key).await {
                 self.resolve_agent_id_for_entry(&parent, false).await
@@ -938,7 +1021,36 @@ impl LiveSessionService {
             self.default_agent_id().await
         };
 
-        let _ = self.metadata.set_agent_id(key, Some(&fallback)).await;
+        let effective_agent = if entry
+            .agent_id
+            .as_deref()
+            .is_some_and(|id| !id.trim().is_empty())
+        {
+            self.resolve_agent_id_for_entry(&entry, true).await
+        } else {
+            let _ = self.metadata.set_agent_id(key, Some(&fallback)).await;
+            fallback.clone()
+        };
+        if entry
+            .memory_owner_agent_id
+            .as_deref()
+            .is_none_or(|id| id.trim().is_empty())
+        {
+            let _ = self
+                .metadata
+                .set_memory_owner_agent_id(key, Some(&effective_agent))
+                .await;
+        }
+        if entry
+            .agent_mode
+            .as_deref()
+            .is_none_or(|value| value.trim().is_empty())
+        {
+            let _ = self
+                .metadata
+                .set_agent_mode(key, Some(AGENT_MODE_ATTACHED))
+                .await;
+        }
         self.metadata.get(key).await
     }
 }
@@ -951,6 +1063,10 @@ impl SessionService for LiveSessionService {
         let mut entries: Vec<Value> = Vec::with_capacity(all.len());
         for e in all {
             let agent_id = self.resolve_agent_id_for_entry(&e, false).await;
+            let memory_owner_agent_id = self
+                .resolve_memory_owner_agent_id_for_entry(&e, false)
+                .await;
+            let agent_mode = self.resolve_agent_mode_for_entry(&e, false).await;
             // Check if this session is the active one for its channel binding.
             let active_channel = if let Some(ref binding_json) = e.channel_binding {
                 if let Ok(target) =
@@ -993,6 +1109,10 @@ impl SessionService for LiveSessionService {
                 "preview": e.preview,
                 "agent_id": agent_id,
                 "agentId": agent_id,
+                "memory_owner_agent_id": memory_owner_agent_id,
+                "memoryOwnerAgentId": memory_owner_agent_id,
+                "agent_mode": agent_mode,
+                "agentMode": agent_mode,
                 "version": e.version,
             }));
         }
@@ -1072,6 +1192,10 @@ impl SessionService for LiveSessionService {
                 "mcpDisabled": entry.mcp_disabled,
                 "agent_id": entry.agent_id,
                 "agentId": entry.agent_id,
+                "memory_owner_agent_id": entry.memory_owner_agent_id,
+                "memoryOwnerAgentId": entry.memory_owner_agent_id,
+                "agent_mode": entry.agent_mode,
+                "agentMode": entry.agent_mode,
                 "version": entry.version,
             },
             "history": filter_ui_history(history),
@@ -1172,6 +1296,10 @@ impl SessionService for LiveSessionService {
             "mcpDisabled": entry.mcp_disabled,
             "agent_id": entry.agent_id,
             "agentId": entry.agent_id,
+            "memory_owner_agent_id": entry.memory_owner_agent_id,
+            "memoryOwnerAgentId": entry.memory_owner_agent_id,
+            "agent_mode": entry.agent_mode,
+            "agentMode": entry.agent_mode,
             "version": entry.version,
         }))
     }
@@ -1589,9 +1717,13 @@ impl SessionService for LiveSessionService {
 
         self.metadata.touch(&new_key, fork_point as u32).await;
 
-        // Inherit model, project, mcp_disabled, and agent_id from parent.
+        // Inherit model, project, mcp_disabled, and agent ownership from parent.
         if let Some(parent) = self.metadata.get(parent_key).await {
             let parent_agent = self.resolve_agent_id_for_entry(&parent, false).await;
+            let parent_memory_owner = self
+                .resolve_memory_owner_agent_id_for_entry(&parent, false)
+                .await;
+            let parent_mode = self.resolve_agent_mode_for_entry(&parent, false).await;
             if parent.model.is_some() {
                 self.metadata.set_model(&new_key, parent.model).await;
             }
@@ -1609,11 +1741,27 @@ impl SessionService for LiveSessionService {
                 .metadata
                 .set_agent_id(&new_key, Some(&parent_agent))
                 .await;
+            let _ = self
+                .metadata
+                .set_memory_owner_agent_id(&new_key, Some(&parent_memory_owner))
+                .await;
+            let _ = self
+                .metadata
+                .set_agent_mode(&new_key, Some(&parent_mode))
+                .await;
         } else {
             let default_agent = self.default_agent_id().await;
             let _ = self
                 .metadata
                 .set_agent_id(&new_key, Some(&default_agent))
+                .await;
+            let _ = self
+                .metadata
+                .set_memory_owner_agent_id(&new_key, Some(&default_agent))
+                .await;
+            let _ = self
+                .metadata
+                .set_agent_mode(&new_key, Some(AGENT_MODE_ATTACHED))
                 .await;
         }
 
@@ -1640,6 +1788,10 @@ impl SessionService for LiveSessionService {
             "messageCount": fork_point,
             "agent_id": final_entry.agent_id,
             "agentId": final_entry.agent_id,
+            "memory_owner_agent_id": final_entry.memory_owner_agent_id,
+            "memoryOwnerAgentId": final_entry.memory_owner_agent_id,
+            "agent_mode": final_entry.agent_mode,
+            "agentMode": final_entry.agent_mode,
             "version": final_entry.version,
         }))
     }

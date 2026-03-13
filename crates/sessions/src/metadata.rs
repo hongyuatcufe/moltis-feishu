@@ -45,6 +45,10 @@ pub struct SessionEntry {
     pub preview: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub agent_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub memory_owner_agent_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent_mode: Option<String>,
     #[serde(default)]
     pub version: u64,
 }
@@ -134,6 +138,8 @@ impl SessionMetadata {
                 mcp_disabled: None,
                 preview: None,
                 agent_id: None,
+                memory_owner_agent_id: None,
+                agent_mode: None,
                 version: 0,
             })
     }
@@ -219,6 +225,22 @@ impl SessionMetadata {
         }
     }
 
+    pub fn set_memory_owner_agent_id(&mut self, key: &str, agent_id: Option<String>) {
+        if let Some(entry) = self.entries.get_mut(key) {
+            entry.memory_owner_agent_id = agent_id;
+            entry.updated_at = now_ms();
+            entry.version += 1;
+        }
+    }
+
+    pub fn set_agent_mode(&mut self, key: &str, mode: Option<String>) {
+        if let Some(entry) = self.entries.get_mut(key) {
+            entry.agent_mode = mode;
+            entry.updated_at = now_ms();
+            entry.version += 1;
+        }
+    }
+
     /// Mark/unmark a session as archived.
     pub fn set_archived(&mut self, key: &str, archived: bool) {
         if let Some(entry) = self.entries.get_mut(key) {
@@ -299,6 +321,8 @@ struct SessionRow {
     mcp_disabled: Option<i32>,
     preview: Option<String>,
     agent_id: Option<String>,
+    memory_owner_agent_id: Option<String>,
+    agent_mode: Option<String>,
     version: i64,
 }
 
@@ -324,6 +348,8 @@ impl From<SessionRow> for SessionEntry {
             mcp_disabled: r.mcp_disabled.map(|v| v != 0),
             preview: r.preview,
             agent_id: r.agent_id,
+            memory_owner_agent_id: r.memory_owner_agent_id,
+            agent_mode: r.agent_mode,
             version: r.version as u64,
         }
     }
@@ -387,11 +413,22 @@ impl SqliteSessionMetadata {
                 mcp_disabled        INTEGER,
                 preview             TEXT,
                 agent_id            TEXT,
+                memory_owner_agent_id TEXT,
+                agent_mode          TEXT,
                 version             INTEGER NOT NULL DEFAULT 0
             )"#,
         )
         .execute(pool)
         .await?;
+
+        sqlx::query("ALTER TABLE sessions ADD COLUMN memory_owner_agent_id TEXT")
+            .execute(pool)
+            .await
+            .ok();
+        sqlx::query("ALTER TABLE sessions ADD COLUMN agent_mode TEXT")
+            .execute(pool)
+            .await
+            .ok();
 
         sqlx::query("CREATE INDEX IF NOT EXISTS idx_sessions_created_at ON sessions(created_at)")
             .execute(pool)
@@ -651,6 +688,38 @@ impl SqliteSessionMetadata {
             "UPDATE sessions SET agent_id = ?, updated_at = ?, version = version + 1 WHERE key = ?",
         )
         .bind(agent_id)
+        .bind(now)
+        .bind(key)
+        .execute(&self.pool)
+        .await?;
+        self.emit(crate::session_events::SessionEvent::Patched {
+            session_key: key.to_string(),
+        });
+        Ok(())
+    }
+
+    pub async fn set_memory_owner_agent_id(&self, key: &str, agent_id: Option<&str>) -> Result<()> {
+        let now = now_ms() as i64;
+        sqlx::query(
+            "UPDATE sessions SET memory_owner_agent_id = ?, updated_at = ?, version = version + 1 WHERE key = ?",
+        )
+        .bind(agent_id)
+        .bind(now)
+        .bind(key)
+        .execute(&self.pool)
+        .await?;
+        self.emit(crate::session_events::SessionEvent::Patched {
+            session_key: key.to_string(),
+        });
+        Ok(())
+    }
+
+    pub async fn set_agent_mode(&self, key: &str, mode: Option<&str>) -> Result<()> {
+        let now = now_ms() as i64;
+        sqlx::query(
+            "UPDATE sessions SET agent_mode = ?, updated_at = ?, version = version + 1 WHERE key = ?",
+        )
+        .bind(mode)
         .bind(now)
         .bind(key)
         .execute(&self.pool)

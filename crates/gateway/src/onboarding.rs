@@ -147,6 +147,22 @@ impl GatewayOnboardingService {
                     "openclaw import: failed to set agent_id on session"
                 );
             }
+            let imported_owner = entry
+                .memory_owner_agent_id
+                .as_deref()
+                .or(entry.agent_id.as_deref());
+            let _ = self
+                .session_metadata
+                .set_memory_owner_agent_id(&entry.key, imported_owner)
+                .await;
+            let imported_mode = entry
+                .agent_mode
+                .as_deref()
+                .or(Some("attached"));
+            let _ = self
+                .session_metadata
+                .set_agent_mode(&entry.key, imported_mode)
+                .await;
             self.session_metadata
                 .set_preview(&entry.key, entry.preview.as_deref())
                 .await;

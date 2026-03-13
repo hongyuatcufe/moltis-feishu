@@ -33,6 +33,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Multi-agent personas with per-agent workspaces (`data_dir()/agents/<id>/`), `agents.*` RPC methods, and session-level `agent_id` binding/switching across web + Telegram flows
 ### Changed
 
+- Agent session routing now distinguishes active persona from memory ownership: `/agent` performs a temporary same-session persona switch without writing memory to the target agent, while `/handoff` always creates a new attached session for the target agent
+- Cross-agent handoff context now uses a sanitized task summary instead of reusing raw recent dialogue, reducing persona/identity leakage such as prior agent self-identification
 - **Crate restructure**: gateway crate reduced from ~42K to ~29K lines by extracting `moltis-chat` (chat engine, agent orchestration), `moltis-auth` (password + passkey auth), `moltis-tls` (TLS/HTTPS termination), `moltis-service-traits` (shared service interfaces), and moving share rendering into `moltis-web`
 - Provider wiring now routes through `moltis-providers` instead of `moltis-agents::providers`, and local LLM feature flags (`local-llm`, `local-llm-cuda`, `local-llm-metal`) now resolve via `moltis-providers`
 - Voice now auto-selects the first configured TTS/STT provider when no explicit
@@ -62,6 +64,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Agent-scoped memory writes and compaction now respect session ownership, preventing temporary `/agent` switches from persisting contaminated memory into the borrowed agent workspace
 - Channel image delivery now parses the actual MIME type from data URIs instead of hardcoding `image/png`
 - Docker image now installs Docker CLI from Docker’s official Debian repository (`docker-ce-cli`), avoiding API mismatches with newer host daemons during sandbox builds/exec
 - Chat UI now shows a first-run sandbox preparation status message before container/image setup begins, so startup delays are visible while sandbox resources are created

@@ -91,6 +91,10 @@ async fn resolve_session_agent_id_for_ctx(ctx: &MethodContext) -> String {
         "session references unknown agent, falling back to default"
     );
     let _ = metadata.set_agent_id(&session_key, Some(&default_id)).await;
+    let _ = metadata
+        .set_memory_owner_agent_id(&session_key, Some(&default_id))
+        .await;
+    let _ = metadata.set_agent_mode(&session_key, Some("attached")).await;
     default_id
 }
 
@@ -534,6 +538,16 @@ pub(super) fn register(reg: &mut MethodRegistry) {
                                 .map_err(|e| {
                                     ErrorShape::new(error_codes::UNAVAILABLE, e.to_string())
                                 })?;
+                            meta.set_memory_owner_agent_id(&session.key, Some(&fallback_default_id))
+                                .await
+                                .map_err(|e| {
+                                    ErrorShape::new(error_codes::UNAVAILABLE, e.to_string())
+                                })?;
+                            meta.set_agent_mode(&session.key, Some("attached"))
+                                .await
+                                .map_err(|e| {
+                                    ErrorShape::new(error_codes::UNAVAILABLE, e.to_string())
+                                })?;
                             reassigned_sessions = reassigned_sessions.saturating_add(1);
                         }
                     }
@@ -605,6 +619,12 @@ pub(super) fn register(reg: &mut MethodRegistry) {
                         .await
                         .map_err(|e| ErrorShape::new(error_codes::UNAVAILABLE, e.to_string()))?;
                     meta.set_agent_id(session_key, Some(&agent_id))
+                        .await
+                        .map_err(|e| ErrorShape::new(error_codes::UNAVAILABLE, e.to_string()))?;
+                    meta.set_memory_owner_agent_id(session_key, Some(&agent_id))
+                        .await
+                        .map_err(|e| ErrorShape::new(error_codes::UNAVAILABLE, e.to_string()))?;
+                    meta.set_agent_mode(session_key, Some("attached"))
                         .await
                         .map_err(|e| ErrorShape::new(error_codes::UNAVAILABLE, e.to_string()))?;
                     Ok(serde_json::json!({ "ok": true, "agent_id": agent_id }))
