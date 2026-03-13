@@ -168,6 +168,7 @@ impl SessionService for NoopSessionService {
 #[async_trait]
 pub trait ChannelService: Send + Sync {
     async fn status(&self) -> ServiceResult;
+    async fn account_config(&self, params: Value) -> ServiceResult;
     async fn logout(&self, params: Value) -> ServiceResult;
     async fn send(&self, params: Value) -> ServiceResult;
     async fn add(&self, params: Value) -> ServiceResult;
@@ -184,6 +185,10 @@ pub struct NoopChannelService;
 impl ChannelService for NoopChannelService {
     async fn status(&self) -> ServiceResult {
         Ok(serde_json::json!({ "channels": [] }))
+    }
+
+    async fn account_config(&self, _p: Value) -> ServiceResult {
+        Err("no channel service configured".into())
     }
 
     async fn logout(&self, _p: Value) -> ServiceResult {

@@ -1,4 +1,4 @@
-use {async_trait::async_trait, secrecy::ExposeSecret, tracing::{debug, warn}};
+use {async_trait::async_trait, secrecy::ExposeSecret, tracing::debug};
 use base64::Engine;
 
 use {
@@ -198,42 +198,18 @@ impl ChannelOutbound for FeishuOutbound {
                 let image_key = Self::upload_image(&snapshot, media).await?;
                 let content = serde_json::json!({ "image_key": image_key });
                 self.send_message(account_id, to, "image", content).await?;
-            } else if media.mime_type.starts_with("audio/") {
-                let audio_upload_type = audio_upload_file_type(&media.mime_type);
-                if let Some(upload_type) = audio_upload_type {
-                    let file_key = Self::upload_file(&snapshot, media, upload_type).await?;
-                    let filename = filename_from_media(media, "audio");
-                    let audio_content = serde_json::json!({
-                        "file_key": &file_key,
-                    });
-                    if let Err(e) = self.send_message(account_id, to, "audio", audio_content).await
-                    {
-                        warn!(
-                            account_id,
-                            to,
-                            media_mime = %media.mime_type,
-                            error = %e,
-                            "failed to send Feishu audio message, falling back to file"
-                        );
-                        let fallback_content = serde_json::json!({
-                            "file_key": &file_key,
-                            "file_name": filename,
-                        });
-                        self.send_message(account_id, to, "file", fallback_content).await?;
-                    }
-                } else {
-                    let file_key = Self::upload_file(&snapshot, media, "stream").await?;
-                    let content = serde_json::json!({
-                        "file_key": &file_key,
-                        "file_name": filename_from_media(media, "audio"),
-                    });
-                    self.send_message(account_id, to, "file", content).await?;
-                }
             } else {
                 let file_key = Self::upload_file(&snapshot, media, "stream").await?;
                 let content = serde_json::json!({
                     "file_key": file_key,
-                    "file_name": filename_from_media(media, "file"),
+                    "file_name": filename_from_media(
+                        media,
+                        if media.mime_type.starts_with("audio/") {
+                            "audio"
+                        } else {
+                            "file"
+                        },
+                    ),
                 });
                 self.send_message(account_id, to, "file", content).await?;
             }
@@ -411,21 +387,6 @@ fn extension_from_mime(mime_type: &str) -> Option<&'static str> {
     }
 }
 
-fn audio_upload_file_type(mime_type: &str) -> Option<&'static str> {
-    match mime_type
-        .split(';')
-        .next()
-        .unwrap_or_default()
-        .trim()
-        .to_ascii_lowercase()
-        .as_str()
-    {
-        // Feishu audio message requires opus upload type.
-        "audio/ogg" | "audio/opus" => Some("opus"),
-        _ => None,
-    }
-}
-
 fn filename_from_media(media: &MediaAttachment, fallback_stem: &str) -> String {
     if let Some(name) = filename_from_url(&media.url) {
         return name;
@@ -467,17 +428,6 @@ mod tests {
             mime_type: "application/octet-stream".to_string(),
         };
         assert_eq!(filename_from_media(&media, "file"), "file");
-    }
-
-    #[test]
-    fn audio_upload_file_type_only_accepts_ogg_or_opus() {
-        assert_eq!(audio_upload_file_type("audio/ogg"), Some("opus"));
-        assert_eq!(
-            audio_upload_file_type("audio/ogg; codecs=opus"),
-            Some("opus")
-        );
-        assert_eq!(audio_upload_file_type("audio/opus"), Some("opus"));
-        assert_eq!(audio_upload_file_type("audio/mpeg"), None);
     }
 
     #[tokio::test]

@@ -241,3 +241,87 @@ impl ChannelStatus for FeishuPlugin {
         Ok(snap)
     }
 }
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
+mod tests {
+    use super::*;
+
+    fn test_account_state(config: FeishuAccountConfig) -> AccountState {
+        AccountState {
+            config,
+            cancel: tokio_util::sync::CancellationToken::new(),
+            http: reqwest::Client::new(),
+            token_cache: Arc::new(tokio::sync::Mutex::new(None)),
+            bot_open_id: None,
+            ws_connected: Arc::new(AtomicBool::new(false)),
+        }
+    }
+
+    #[tokio::test]
+    async fn start_account_requires_credentials() {
+        let mut plugin = FeishuPlugin::new();
+        let err = plugin
+            .start_account("bot", serde_json::json!({}))
+            .await
+            .unwrap_err();
+
+        assert!(err.to_string().contains("app_id and app_secret"));
+        assert!(!plugin.has_account("bot"));
+    }
+
+    #[test]
+    fn update_account_config_replaces_live_config() {
+        let plugin = FeishuPlugin::new();
+        {
+            let mut accounts = plugin.accounts.write().unwrap();
+            accounts.insert(
+                "bot".to_string(),
+                test_account_state(FeishuAccountConfig {
+                    app_id: secrecy::Secret::new("old-app".to_string()),
+                    app_secret: secrecy::Secret::new("old-secret".to_string()),
+                    allow_agent_switch: false,
+                    session_auto_archive_days: 30,
+                    ..Default::default()
+                }),
+            );
+        }
+
+        plugin
+            .update_account_config(
+                "bot",
+                serde_json::json!({
+                    "app_id": "new-app",
+                    "app_secret": "new-secret",
+                    "allow_agent_switch": true,
+                    "session_auto_archive_days": 7
+                }),
+            )
+            .unwrap();
+
+        let cfg = plugin.account_config("bot").unwrap();
+        assert_eq!(cfg["app_id"], "new-app");
+        assert_eq!(cfg["allow_agent_switch"], true);
+        assert_eq!(cfg["session_auto_archive_days"], 7);
+    }
+
+    #[tokio::test]
+    async fn stop_account_removes_live_account() {
+        let mut plugin = FeishuPlugin::new();
+        {
+            let mut accounts = plugin.accounts.write().unwrap();
+            accounts.insert(
+                "bot".to_string(),
+                test_account_state(FeishuAccountConfig {
+                    app_id: secrecy::Secret::new("app".to_string()),
+                    app_secret: secrecy::Secret::new("secret".to_string()),
+                    ..Default::default()
+                }),
+            );
+        }
+
+        plugin.stop_account("bot").await.unwrap();
+
+        assert!(!plugin.has_account("bot"));
+    }
+}

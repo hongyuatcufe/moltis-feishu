@@ -1044,4 +1044,20 @@ mod tests {
         assert!(warnings.iter().any(|w| w.contains("anspire")));
         assert!(warnings.iter().any(|w| w.contains("jina")));
     }
+
+    #[test]
+    fn env_override_provides_missing_provider_key() {
+        let mut cfg = WebCnSearchConfig::default();
+        cfg.enabled = true;
+        cfg.metaso.enabled = true;
+
+        let tool = WebCnSearchTool::from_config_with_env_overrides(
+            &cfg,
+            &HashMap::from([("METASO_API_KEY".to_string(), "env-key".to_string())]),
+        )
+        .unwrap();
+
+        assert!(tool.has_any_accounts());
+        assert!(tool.warnings().iter().all(|w| !w.contains("metaso")));
+    }
 }

@@ -265,6 +265,79 @@ fn build_schema_map() -> KnownKeys {
         ]))
     };
 
+    let telegram_channel = || {
+        Struct(HashMap::from([
+            ("token", Leaf),
+            ("dm_policy", Leaf),
+            ("group_policy", Leaf),
+            ("mention_mode", Leaf),
+            ("allowlist", Leaf),
+            ("group_allowlist", Leaf),
+            ("stream_mode", Leaf),
+            ("edit_throttle_ms", Leaf),
+            ("stream_notify_on_complete", Leaf),
+            ("stream_min_initial_chars", Leaf),
+            ("model", Leaf),
+            ("model_provider", Leaf),
+            ("otp_self_approval", Leaf),
+            ("otp_cooldown_secs", Leaf),
+            ("reply_to_message", Leaf),
+        ]))
+    };
+
+    let msteams_channel = || {
+        Struct(HashMap::from([
+            ("app_id", Leaf),
+            ("app_password", Leaf),
+            ("oauth_tenant", Leaf),
+            ("oauth_scope", Leaf),
+            ("dm_policy", Leaf),
+            ("group_policy", Leaf),
+            ("mention_mode", Leaf),
+            ("allowlist", Leaf),
+            ("group_allowlist", Leaf),
+            ("webhook_secret", Leaf),
+            ("model", Leaf),
+            ("model_provider", Leaf),
+        ]))
+    };
+
+    let feishu_channel = || {
+        Struct(HashMap::from([
+            ("app_id", Leaf),
+            ("app_secret", Leaf),
+            ("base_url", Leaf),
+            ("ws_endpoint", Leaf),
+            ("dm_policy", Leaf),
+            ("group_policy", Leaf),
+            ("mention_mode", Leaf),
+            ("allowlist", Leaf),
+            ("group_allowlist", Leaf),
+            ("model", Leaf),
+            ("model_provider", Leaf),
+            ("agent_id", Leaf),
+            ("allow_agent_switch", Leaf),
+            ("session_auto_archive_days", Leaf),
+        ]))
+    };
+
+    let whatsapp_channel = || {
+        Struct(HashMap::from([
+            ("store_path", Leaf),
+            ("display_name", Leaf),
+            ("phone_number", Leaf),
+            ("paired", Leaf),
+            ("model", Leaf),
+            ("model_provider", Leaf),
+            ("dm_policy", Leaf),
+            ("group_policy", Leaf),
+            ("allowlist", Leaf),
+            ("group_allowlist", Leaf),
+            ("otp_self_approval", Leaf),
+            ("otp_cooldown_secs", Leaf),
+        ]))
+    };
+
     let tools = || {
         Struct(HashMap::from([
             ("exec", exec()),
@@ -387,10 +460,10 @@ fn build_schema_map() -> KnownKeys {
             "channels",
             Struct(HashMap::from([
                 ("offered", Array(Box::new(Leaf))),
-                ("telegram", Map(Box::new(Leaf))),
-                ("whatsapp", Map(Box::new(Leaf))),
-                ("msteams", Map(Box::new(Leaf))),
-                ("feishu", Map(Box::new(Leaf))),
+                ("telegram", Map(Box::new(telegram_channel()))),
+                ("whatsapp", Map(Box::new(whatsapp_channel()))),
+                ("msteams", Map(Box::new(msteams_channel()))),
+                ("feishu", Map(Box::new(feishu_channel()))),
             ])),
         ),
         (
@@ -2007,6 +2080,26 @@ offered = ["telegram", "slack"]
         assert!(
             warning.is_some(),
             "unknown channel type should produce warning, got: {:?}",
+            result.diagnostics
+        );
+    }
+
+    #[test]
+    fn channels_nested_unknown_field_is_reported() {
+        let toml = r#"
+[channels.feishu.main]
+app_id = "app-id"
+app_secret = "secret"
+unexpected_toggle = true
+"#;
+        let result = validate_toml_str(toml);
+        let warning = result
+            .diagnostics
+            .iter()
+            .find(|d| d.path == "channels.feishu.main.unexpected_toggle" && d.category == "unknown-field");
+        assert!(
+            warning.is_some(),
+            "unknown nested feishu field should produce warning, got: {:?}",
             result.diagnostics
         );
     }

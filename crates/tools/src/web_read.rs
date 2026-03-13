@@ -527,4 +527,20 @@ mod tests {
         let warnings = tool.warnings();
         assert!(warnings.iter().any(|w| w.contains("pinchtab token set but endpoint is missing")));
     }
+
+    #[test]
+    fn env_override_provides_missing_reader_key() {
+        let mut cfg = WebReadConfig::default();
+        cfg.enabled = true;
+        cfg.jina.enabled = true;
+
+        let tool = WebReadTool::from_config_with_env_overrides(
+            &cfg,
+            &HashMap::from([("JINA_API_KEY".to_string(), "env-key".to_string())]),
+        )
+        .unwrap();
+
+        assert!(tool.is_configured());
+        assert!(tool.warnings().iter().all(|w| !w.contains("jina enabled")));
+    }
 }

@@ -682,92 +682,14 @@ async fn handle_event_value(
     };
 
     if message_type == "audio" {
-        let audio_key = content_json
-            .get("file_key")
-            .and_then(|v| v.as_str())
-            .or_else(|| content_json.get("audio_key").and_then(|v| v.as_str()));
-        let file_name = content_json
-            .get("file_name")
-            .and_then(|v| v.as_str())
-            .map(str::trim)
-            .filter(|v| !v.is_empty());
-
-        if let Some(sink) = event_sink
-            && !sink.voice_stt_available().await
-        {
-            if let Err(e) = send_text_message(
-                state,
-                chat_id,
-                "I can't understand voice, you did not configure it, please visit Settings -> Voice",
-            )
-            .await
-            {
-                warn!(account_id, error = %e, "failed to send STT setup hint");
-            }
-            return Ok(());
-        }
-
-        let Some(audio_key) = audio_key else {
-            if let Some(sink) = event_sink {
-                sink.dispatch_to_chat("[Voice message - missing audio key]", reply_to, meta)
-                    .await;
-            }
-            return Ok(());
-        };
-
-        match download_message_resource(
+        if let Err(e) = send_text_message(
             state,
-            message_id.as_deref(),
-            audio_key,
-            "audio",
-            file_name,
+            chat_id,
+            "Voice messages are not supported in this fork. Please send text or upload a file instead.",
         )
         .await
         {
-            Ok(audio_attachment) => {
-                let format = infer_audio_format(
-                    &audio_attachment.media_type,
-                    audio_attachment.original_name.as_deref(),
-                );
-                let mut meta = meta;
-                if let Some(sink) = event_sink {
-                    let message_id_for_file = message_id.as_deref().unwrap_or("unknown");
-                    let filename = format!("voice-feishu-{message_id_for_file}.{format}");
-                    meta.audio_filename = sink
-                        .save_channel_voice(&audio_attachment.data, &filename, &reply_to)
-                        .await;
-
-                    match sink.transcribe_voice(&audio_attachment.data, format).await {
-                        Ok(transcribed) if transcribed.trim().is_empty() => {
-                            sink.dispatch_to_chat(
-                                "[Voice message - could not transcribe]",
-                                reply_to,
-                                meta,
-                            )
-                            .await;
-                        }
-                        Ok(transcribed) => {
-                            sink.dispatch_to_chat(&transcribed, reply_to, meta).await;
-                        }
-                        Err(e) => {
-                            warn!(account_id, error = %e, "feishu voice transcription failed");
-                            sink.dispatch_to_chat(
-                                "[Voice message - transcription unavailable]",
-                                reply_to,
-                                meta,
-                            )
-                            .await;
-                        }
-                    }
-                }
-            }
-            Err(e) => {
-                warn!(account_id, error = %e, "failed to download Feishu audio");
-                if let Some(sink) = event_sink {
-                    sink.dispatch_to_chat("[Voice message - download failed]", reply_to, meta)
-                        .await;
-                }
-            }
+            warn!(account_id, error = %e, "failed to send voice unsupported hint");
         }
         return Ok(());
     }
@@ -922,38 +844,6 @@ fn map_message_kind(message_type: &str) -> ChannelMessageKind {
     }
 }
 
-fn infer_audio_format(media_type: &str, original_name: Option<&str>) -> &'static str {
-    if let Some(ext) = original_name
-        .and_then(|name| std::path::Path::new(name).extension().and_then(|v| v.to_str()))
-        .map(|v| v.to_ascii_lowercase())
-    {
-        match ext.as_str() {
-            "ogg" | "opus" => return "ogg",
-            "mp3" => return "mp3",
-            "m4a" | "aac" | "mp4" => return "m4a",
-            "wav" => return "wav",
-            "webm" => return "webm",
-            _ => {}
-        }
-    }
-
-    match media_type
-        .split(';')
-        .next()
-        .unwrap_or_default()
-        .trim()
-        .to_ascii_lowercase()
-        .as_str()
-    {
-        "audio/ogg" | "audio/opus" => "ogg",
-        "audio/mpeg" | "audio/mp3" => "mp3",
-        "audio/mp4" | "audio/m4a" | "audio/x-m4a" | "audio/aac" => "m4a",
-        "audio/wav" | "audio/x-wav" | "audio/pcm" => "wav",
-        "audio/webm" => "webm",
-        _ => "ogg",
-    }
-}
-
 fn mentions_target_bot(mentions: &[serde_json::Value], bot_open_id: Option<&str>) -> bool {
     if mentions.is_empty() {
         return false;
@@ -1100,22 +990,4 @@ mod tests {
         );
     }
 
-    #[test]
-    fn infer_audio_format_prefers_file_extension() {
-        assert_eq!(
-            infer_audio_format("application/octet-stream", Some("voice-note.webm")),
-            "webm"
-        );
-        assert_eq!(infer_audio_format("audio/ogg", Some("sound.mp3")), "mp3");
-    }
-
-    #[test]
-    fn infer_audio_format_falls_back_to_media_type() {
-        assert_eq!(infer_audio_format("audio/ogg", None), "ogg");
-        assert_eq!(infer_audio_format("audio/mpeg", None), "mp3");
-        assert_eq!(infer_audio_format("audio/mp4", None), "m4a");
-        assert_eq!(infer_audio_format("audio/wav", None), "wav");
-        assert_eq!(infer_audio_format("audio/webm", None), "webm");
-        assert_eq!(infer_audio_format("application/octet-stream", None), "ogg");
-    }
 }

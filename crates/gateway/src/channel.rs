@@ -25,11 +25,72 @@ use moltis_whatsapp::WhatsAppPlugin;
 
 use crate::services::{ChannelService, ServiceError, ServiceResult};
 
+const REDACTED_SECRET: &str = "[REDACTED]";
+
 fn unix_now() -> i64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()
         .as_secs() as i64
+}
+
+fn is_secret_config_key(key: &str) -> bool {
+    matches!(
+        key,
+        "token" | "app_password" | "app_secret" | "webhook_secret"
+    )
+}
+
+fn redact_channel_config(config: Value) -> Value {
+    match config {
+        Value::Object(mut map) => {
+            for (key, value) in &mut map {
+                if is_secret_config_key(key) {
+                    *value = Value::String(REDACTED_SECRET.to_string());
+                    continue;
+                }
+                *value = redact_channel_config(value.take());
+            }
+            Value::Object(map)
+        },
+        Value::Array(items) => Value::Array(items.into_iter().map(redact_channel_config).collect()),
+        other => other,
+    }
+}
+
+fn merge_channel_config(existing: Value, incoming: Value) -> Value {
+    let mut existing_map = match existing {
+        Value::Object(map) => map,
+        _ => return incoming,
+    };
+    let incoming_map = match incoming {
+        Value::Object(map) => map,
+        other => return other,
+    };
+
+    for (key, value) in incoming_map {
+        let keep_existing_secret = is_secret_config_key(&key)
+            && match &value {
+                Value::Null => true,
+                Value::String(raw) => {
+                    let trimmed = raw.trim();
+                    trimmed.is_empty() || trimmed == REDACTED_SECRET
+                },
+                _ => false,
+            };
+        if keep_existing_secret {
+            continue;
+        }
+        let merged_value = match (existing_map.remove(&key), value) {
+            (Some(Value::Object(existing_child)), Value::Object(incoming_child)) => {
+                merge_channel_config(Value::Object(existing_child), Value::Object(incoming_child))
+            },
+            (_, incoming_value) => incoming_value,
+        };
+        existing_map.insert(key, merged_value);
+    }
+
+    Value::Object(existing_map)
 }
 
 /// Live channel service backed by Telegram, Microsoft Teams, and WhatsApp plugins.
@@ -313,6 +374,30 @@ impl LiveChannelService {
             .and_then(|v| serde_json::from_value(v).ok())
             .unwrap_or_default()
     }
+
+    async fn read_account_config(&self, channel_type: ChannelType, account_id: &str) -> Option<Value> {
+        match channel_type {
+            ChannelType::Telegram => {
+                let tg = self.telegram.read().await;
+                tg.account_config(account_id)
+            },
+            ChannelType::MsTeams => {
+                let ms = self.msteams.read().await;
+                ms.account_config(account_id)
+            },
+            ChannelType::Feishu => {
+                let fs = self.feishu.read().await;
+                fs.account_config(account_id)
+            },
+            #[cfg(feature = "whatsapp")]
+            ChannelType::Whatsapp => {
+                let wa = self.whatsapp.read().await;
+                wa.account_config(account_id)
+            },
+            #[cfg(not(feature = "whatsapp"))]
+            ChannelType::Whatsapp => None,
+        }
+    }
 }
 
 #[async_trait]
@@ -333,7 +418,7 @@ impl ChannelService for LiveChannelService {
                                     "Telegram",
                                     aid,
                                     snap,
-                                    tg.account_config(aid),
+                                    tg.account_config(aid).map(redact_channel_config),
                                 )
                                 .await;
                             channels.push(entry);
@@ -363,7 +448,7 @@ impl ChannelService for LiveChannelService {
                                     "Microsoft Teams",
                                     aid,
                                     snap,
-                                    ms.account_config(aid),
+                                    ms.account_config(aid).map(redact_channel_config),
                                 )
                                 .await;
                             channels.push(entry);
@@ -393,7 +478,7 @@ impl ChannelService for LiveChannelService {
                                     "Feishu",
                                     aid,
                                     snap,
-                                    fs.account_config(aid),
+                                    fs.account_config(aid).map(redact_channel_config),
                                 )
                                 .await;
                             channels.push(entry);
@@ -424,7 +509,7 @@ impl ChannelService for LiveChannelService {
                                     "WhatsApp",
                                     aid,
                                     snap,
-                                    wa.account_config(aid),
+                                    wa.account_config(aid).map(redact_channel_config),
                                 )
                                 .await;
                             channels.push(entry);
@@ -442,6 +527,27 @@ impl ChannelService for LiveChannelService {
         }
 
         Ok(serde_json::json!({ "channels": channels }))
+    }
+
+    async fn account_config(&self, params: Value) -> ServiceResult {
+        let account_id = params
+            .get("account_id")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| "missing 'account_id'".to_string())?;
+        let channel_type = self
+            .resolve_channel_type(&params, account_id, ChannelType::Telegram)
+            .await?;
+        let config = self
+            .read_account_config(channel_type, account_id)
+            .await
+            .ok_or_else(|| {
+                format!(
+                    "channel '{}' ({}) is not active",
+                    account_id,
+                    channel_type.as_str()
+                )
+            })?;
+        Ok(config)
     }
 
     async fn add(&self, params: Value) -> ServiceResult {
@@ -528,6 +634,20 @@ impl ChannelService for LiveChannelService {
             .get("config")
             .cloned()
             .ok_or_else(|| "missing 'config'".to_string())?;
+        let existing_config = self
+            .store
+            .get(channel_type.as_str(), account_id)
+            .await
+            .map_err(|e| e.to_string())?
+            .map(|s| s.config);
+        let existing_config = match existing_config {
+            Some(config) => config,
+            None => self
+                .read_account_config(channel_type, account_id)
+                .await
+                .unwrap_or_else(|| Value::Object(Default::default())),
+        };
+        let merged_config = merge_channel_config(existing_config, config);
 
         info!(
             account_id,
@@ -535,7 +655,7 @@ impl ChannelService for LiveChannelService {
             "updating channel account"
         );
         self.stop_plugin_account(channel_type, account_id).await?;
-        self.start_plugin_account(channel_type, account_id, config.clone())
+        self.start_plugin_account(channel_type, account_id, merged_config.clone())
             .await?;
 
         let created_at = self
@@ -551,7 +671,7 @@ impl ChannelService for LiveChannelService {
             .upsert(StoredChannel {
                 account_id: account_id.to_string(),
                 channel_type: channel_type.to_string(),
-                config,
+                config: merged_config,
                 created_at,
                 updated_at: now,
             })
@@ -770,5 +890,69 @@ impl ChannelService for LiveChannelService {
             "denied": identifier,
             "type": channel_type.to_string()
         }))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn redact_channel_config_masks_known_secret_fields() {
+        let redacted = redact_channel_config(serde_json::json!({
+            "token": "telegram-secret",
+            "app_id": "feishu-app-id",
+            "nested": {
+                "app_secret": "feishu-secret",
+                "webhook_secret": "teams-secret",
+            }
+        }));
+
+        assert_eq!(redacted["token"], REDACTED_SECRET);
+        assert_eq!(redacted["app_id"], "feishu-app-id");
+        assert_eq!(redacted["nested"]["app_secret"], REDACTED_SECRET);
+        assert_eq!(redacted["nested"]["webhook_secret"], REDACTED_SECRET);
+    }
+
+    #[test]
+    fn merge_channel_config_preserves_existing_secrets() {
+        let merged = merge_channel_config(
+            serde_json::json!({
+                "token": "existing-token",
+                "app_password": "existing-password",
+                "dm_policy": "allowlist",
+                "allowlist": ["alice"],
+            }),
+            serde_json::json!({
+                "token": REDACTED_SECRET,
+                "app_password": "",
+                "dm_policy": "open",
+                "allowlist": ["bob"],
+            }),
+        );
+
+        assert_eq!(merged["token"], "existing-token");
+        assert_eq!(merged["app_password"], "existing-password");
+        assert_eq!(merged["dm_policy"], "open");
+        assert_eq!(merged["allowlist"], serde_json::json!(["bob"]));
+    }
+
+    #[test]
+    fn merge_channel_config_keeps_unspecified_existing_fields() {
+        let merged = merge_channel_config(
+            serde_json::json!({
+                "group_policy": "disabled",
+                "mention_mode": "mention",
+                "token": "existing-token",
+            }),
+            serde_json::json!({
+                "dm_policy": "allowlist",
+            }),
+        );
+
+        assert_eq!(merged["group_policy"], "disabled");
+        assert_eq!(merged["mention_mode"], "mention");
+        assert_eq!(merged["token"], "existing-token");
+        assert_eq!(merged["dm_policy"], "allowlist");
     }
 }
