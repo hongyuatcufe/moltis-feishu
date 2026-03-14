@@ -11,6 +11,7 @@ import {
 	stripChannelPrefix,
 	updateTokenBar,
 } from "./chat-ui.js";
+import { highlightCodeBlocks } from "./code-highlight.js";
 import { eventListeners } from "./events.js";
 import {
 	formatTokenSpeed,
@@ -38,17 +39,28 @@ import {
 	cacheSessionHistoryMessage,
 	clearSessionHistoryCache,
 	fetchSessions,
+	markSessionLocallyCleared,
 	setSessionActiveRunId,
 	setSessionReplying,
 	setSessionUnread,
 } from "./sessions.js";
 import * as S from "./state.js";
 import { sessionStore } from "./stores/session-store.js";
-import { connectWs, forceReconnect } from "./ws-connect.js";
+import { connectWs, forceReconnect, subscribeEvents } from "./ws-connect.js";
 
 // ── Chat event handlers ──────────────────────────────────────
 
 var pendingToolCallEnds = new Map();
+var hasConnectedOnce = false;
+
+function clearChatEmptyState() {
+	if (!S.chatMsgBox) return;
+	var welcome = S.chatMsgBox.querySelector("#welcomeCard");
+	if (welcome) welcome.remove();
+	var noProviders = S.chatMsgBox.querySelector("#noProvidersCard");
+	if (noProviders) noProviders.remove();
+	S.chatMsgBox.classList.remove("chat-messages-empty");
+}
 
 function toolCallLogicalId(payload) {
 	if (!payload) return "";
@@ -109,8 +121,23 @@ function moveFirstQueuedToChat() {
 	firstQueued.classList.remove("queued");
 	var badge = firstQueued.querySelector(".queued-badge");
 	if (badge) badge.remove();
+	clearChatEmptyState();
 	S.chatMsgBox.appendChild(firstQueued);
 	if (!tray.querySelector(".msg")) tray.classList.add("hidden");
+}
+
+function makeThinkingStopBtn(sessionKey) {
+	var btn = document.createElement("button");
+	btn.className = "thinking-stop-btn";
+	btn.type = "button";
+	btn.title = "Stop generation";
+	btn.textContent = "Stop";
+	btn.addEventListener("click", () => {
+		btn.disabled = true;
+		btn.textContent = "Stopping…";
+		sendRpc("chat.abort", { sessionKey }).catch(() => undefined);
+	});
+	return btn;
 }
 
 function handleChatThinking(p, isActive, isChatPage, eventSession) {
@@ -118,12 +145,12 @@ function handleChatThinking(p, isActive, isChatPage, eventSession) {
 	setSessionReplying(eventSession, true);
 	if (!(isActive && isChatPage)) return;
 	removeThinking();
-	var welcome = document.getElementById("welcomeCard");
-	if (welcome) welcome.remove();
+	clearChatEmptyState();
 	var thinkEl = document.createElement("div");
 	thinkEl.className = "msg assistant thinking";
 	thinkEl.id = "thinkingIndicator";
 	thinkEl.appendChild(makeThinkingDots());
+	thinkEl.appendChild(makeThinkingStopBtn(eventSession));
 	S.chatMsgBox.appendChild(thinkEl);
 	S.chatMsgBox.scrollTop = S.chatMsgBox.scrollHeight;
 }
@@ -134,11 +161,13 @@ function handleChatThinkingText(p, isActive, isChatPage, eventSession) {
 	if (!(isActive && isChatPage)) return;
 	var indicator = document.getElementById("thinkingIndicator");
 	if (indicator) {
+		var existingBtn = indicator.querySelector(".thinking-stop-btn");
 		while (indicator.firstChild) indicator.removeChild(indicator.firstChild);
 		var textEl = document.createElement("span");
 		textEl.className = "thinking-text";
 		textEl.textContent = p.text;
 		indicator.appendChild(textEl);
+		indicator.appendChild(existingBtn || makeThinkingStopBtn(eventSession));
 		S.chatMsgBox.scrollTop = S.chatMsgBox.scrollHeight;
 	}
 }
@@ -212,6 +241,7 @@ function handleChatToolCallStart(p, isActive, isChatPage, eventSession) {
 	card.querySelector("[data-cmd]").textContent = ` ${cmd}`;
 	// Preserve thinking text as a reasoning disclosure inside the tool card
 	if (thinkingText) appendReasoningDisclosure(card, thinkingText);
+	clearChatEmptyState();
 	S.chatMsgBox.appendChild(card);
 	var endKey = toolCallEventKey(eventSession, p);
 	var pendingEnd = pendingToolCallEnds.get(endKey);
@@ -311,8 +341,9 @@ function clearStaleRunningToolCards() {
 
 function handleChatToolCallEnd(p, isActive, isChatPage, eventSession) {
 	updateSessionRunId(eventSession, p.runId);
-	// Always bump badge — the server persists a tool_result message for each call.
-	bumpSessionCount(eventSession, 1);
+	// Always bump badge — the server persists both the hidden assistant
+	// tool-call frame and the visible tool_result for each completed call.
+	bumpSessionCount(eventSession, 2);
 	var toolHistoryIndex = p.messageIndex;
 	if (toolHistoryIndex === undefined || toolHistoryIndex === null) {
 		var toolSession = sessionStore.getByKey(eventSession);
@@ -434,6 +465,7 @@ function handleChatDelta(p, isActive, isChatPage, eventSession) {
 		S.setStreamText("");
 		S.setStreamEl(document.createElement("div"));
 		S.streamEl.className = "msg assistant";
+		clearChatEmptyState();
 		S.chatMsgBox.appendChild(S.streamEl);
 	}
 	S.setStreamText(S.streamText + p.text);
@@ -578,7 +610,10 @@ function handleChatFinal(p, isActive, isChatPage, eventSession) {
 		var msgEl = S.streamEl || document.createElement("div");
 		msgEl.className = "msg assistant";
 		msgEl.textContent = "";
-		if (!msgEl.parentNode) S.chatMsgBox.appendChild(msgEl);
+		if (!msgEl.parentNode) {
+			clearChatEmptyState();
+			S.chatMsgBox.appendChild(msgEl);
+		}
 
 		if (p.audio) {
 			var filename = p.audio.split("/").pop();
@@ -658,6 +693,10 @@ function handleChatFinal(p, isActive, isChatPage, eventSession) {
 	S.setLastToolOutput("");
 	S.setVoicePending(false);
 	maybeRefreshFullContext();
+	// Syntax-highlight any code blocks in the completed message.
+	if (S.chatMsgBox?.lastElementChild) {
+		highlightCodeBlocks(S.chatMsgBox.lastElementChild);
+	}
 	// Move the next queued message from the tray AFTER the response is
 	// fully rendered. This ensures correct ordering: user-msg → response →
 	// next-user-msg → next-response (never next-user-msg before response).
@@ -707,6 +746,7 @@ function handleChatRetrying(p, isActive, isChatPage, eventSession) {
 		indicator.className = "msg assistant thinking";
 		indicator.id = "thinkingIndicator";
 		indicator.appendChild(makeThinkingDots());
+		clearChatEmptyState();
 		S.chatMsgBox.appendChild(indicator);
 	}
 
@@ -736,6 +776,108 @@ function handleChatError(p, isActive, isChatPage, eventSession) {
 	} else {
 		chatAddErrorMsg(p.message || "unknown");
 	}
+	S.setStreamEl(null);
+	S.setStreamText("");
+	S.setVoicePending(false);
+	moveFirstQueuedToChat();
+}
+
+function getAbortedPartialState(p) {
+	var partial = p.partialMessage && typeof p.partialMessage === "object" ? p.partialMessage : null;
+	var partialText = String(partial?.content || "");
+	var partialReasoning = String(partial?.reasoning || "");
+	return {
+		partial,
+		partialText,
+		partialReasoning,
+		hasVisiblePartial: hasNonWhitespaceContent(partialText) || hasNonWhitespaceContent(partialReasoning),
+	};
+}
+
+function cacheAbortedPartial(eventSession, p, abortSession, partialState) {
+	if (!partialState.hasVisiblePartial) return;
+	var partial = partialState.partial;
+	var lastIdx = abortSession ? abortSession.lastHistoryIndex.value : S.lastHistoryIndex;
+	if (p.messageIndex === undefined || p.messageIndex === null || p.messageIndex > lastIdx) {
+		bumpSessionCount(eventSession, 1);
+	}
+	cacheSessionHistoryMessage(
+		eventSession,
+		{
+			role: "assistant",
+			content: partialState.partialText,
+			model: partial?.model || "",
+			provider: partial?.provider || "",
+			inputTokens: partial?.inputTokens || 0,
+			outputTokens: partial?.outputTokens || 0,
+			durationMs: partial?.durationMs || 0,
+			requestInputTokens: partial?.requestInputTokens,
+			requestOutputTokens: partial?.requestOutputTokens,
+			reasoning: partial?.reasoning || null,
+			audio: partial?.audio || null,
+			run_id: partial?.run_id || p.runId || null,
+			created_at: partial?.created_at || Date.now(),
+		},
+		p.messageIndex,
+	);
+	updateSessionHistoryIndex(eventSession, p.messageIndex);
+}
+
+function renderAbortedPartialInDom(eventSession, p, partialState) {
+	if (!partialState.hasVisiblePartial) return;
+	var partial = partialState.partial;
+	var partialEl = null;
+	if (hasNonWhitespaceContent(partialState.partialText) && S.streamEl) {
+		setSafeMarkdownHtml(S.streamEl, partialState.partialText);
+		partialEl = S.streamEl;
+	} else if (hasNonWhitespaceContent(partialState.partialText)) {
+		partialEl = chatAddMsg("assistant", renderMarkdown(partialState.partialText), true);
+	} else if (hasNonWhitespaceContent(partialState.partialReasoning)) {
+		partialEl = chatAddMsg("assistant", "", false);
+	}
+	if (partialEl && partialState.partialReasoning && !isReasoningAlreadyShown(partialState.partialReasoning)) {
+		appendReasoningDisclosure(partialEl, partialState.partialReasoning);
+	}
+	if (!partialEl) return;
+	appendFinalFooter(
+		partialEl,
+		{
+			model: partial?.model || "",
+			provider: partial?.provider || "",
+			inputTokens: partial?.inputTokens || 0,
+			outputTokens: partial?.outputTokens || 0,
+			durationMs: partial?.durationMs || 0,
+			replyMedium: p.replyMedium || "text",
+			text: partialState.partialText,
+			audio: partial?.audio || null,
+			audioWarning: null,
+			runId: p.runId,
+			messageIndex: p.messageIndex,
+			sessionKey: eventSession,
+		},
+		eventSession,
+	);
+	S.chatMsgBox.scrollTop = S.chatMsgBox.scrollHeight;
+}
+
+function handleChatAborted(p, isActive, isChatPage, eventSession) {
+	clearPendingToolCallEndsForSession(eventSession);
+	setSessionReplying(eventSession, false);
+	setSessionActiveRunId(eventSession, null);
+	var partialState = getAbortedPartialState(p);
+	var abortSession = sessionStore.getByKey(eventSession);
+	cacheAbortedPartial(eventSession, p, abortSession, partialState);
+	if (abortSession) abortSession.resetStreamState();
+	if (partialState.hasVisiblePartial && !isActive) {
+		setSessionUnread(eventSession, true);
+	}
+	if (!(isActive && isChatPage)) {
+		S.setVoicePending(false);
+		return;
+	}
+	removeThinking();
+	clearStaleRunningToolCards();
+	renderAbortedPartialInDom(eventSession, p, partialState);
 	S.setStreamEl(null);
 	S.setStreamText("");
 	S.setVoicePending(false);
@@ -775,11 +917,7 @@ function handleChatSessionCleared(_p, isActive, isChatPage, eventSession) {
 	setSessionActiveRunId(eventSession, null);
 	clearSessionHistoryCache(eventSession);
 	// Reset badge, unread state, and history index for every client.
-	var session = sessionStore.getByKey(eventSession);
-	if (session) {
-		session.syncCounts(0, 0);
-		session.lastHistoryIndex.value = -1;
-	}
+	markSessionLocallyCleared(eventSession);
 	if (isActive) {
 		S.setLastHistoryIndex(-1);
 		S.setChatSeq(0);
@@ -805,6 +943,7 @@ var chatHandlers = {
 	auto_compact: handleChatAutoCompact,
 	retrying: handleChatRetrying,
 	error: handleChatError,
+	aborted: handleChatAborted,
 	notice: handleChatNotice,
 	queue_cleared: handleChatQueueCleared,
 	session_cleared: handleChatSessionCleared,
@@ -819,11 +958,19 @@ function handleChatEvent(p) {
 		// If session switching got stuck (e.g. lost RPC response), do not drop
 		// terminal frames. Unstick and process final/error so replies still show
 		// without requiring a full page reload.
-		if (p.state === "final" || p.state === "error") {
+		var allowDuringSwitch =
+			p.state === "final" ||
+			p.state === "error" ||
+			p.state === "aborted" ||
+			p.state === "notice" ||
+			p.state === "session_cleared" ||
+			p.state === "queue_cleared";
+		if (!allowDuringSwitch) {
+			return;
+		}
+		if (p.state === "final" || p.state === "error" || p.state === "aborted") {
 			sessionStore.switchInProgress.value = false;
 			S.setSessionSwitchInProgress(false);
-		} else {
-			return;
 		}
 	}
 
@@ -1004,6 +1151,7 @@ function handleLocalLlmDownload(payload) {
 		downloadIndicatorEl.appendChild(progressText);
 
 		if (S.chatMsgBox) {
+			clearChatEmptyState();
 			S.chatMsgBox.appendChild(downloadIndicatorEl);
 			S.chatMsgBox.scrollTop = S.chatMsgBox.scrollHeight;
 		}
@@ -1098,6 +1246,10 @@ function handleLocationRequest(payload) {
 	);
 }
 
+function handleNetworkAuditEntry(payload) {
+	if (S.networkAuditEventHandler) S.networkAuditEventHandler(payload);
+}
+
 function handleAuthCredentialsChanged(payload) {
 	if (payload?.reason === "password_changed" && window.__moltisSuppressNextPasswordChangedRedirect === true) {
 		window.__moltisSuppressNextPasswordChangedRedirect = false;
@@ -1122,21 +1274,28 @@ var eventHandlers = {
 	"local-llm.download": handleLocalLlmDownload,
 	"models.updated": handleModelsUpdated,
 	"location.request": handleLocationRequest,
+	"network.audit.entry": handleNetworkAuditEntry,
 };
 
 function dispatchFrame(frame) {
 	if (frame.type !== "event") return;
+	var streamMeta =
+		frame.stream != null || frame.done != null
+			? { stream: frame.stream, done: frame.done, channel: frame.channel }
+			: null;
 	var listeners = eventListeners[frame.event] || [];
 	listeners.forEach((h) => {
-		h(frame.payload || {});
+		h(frame.payload || {}, streamMeta);
 	});
 	var handler = eventHandlers[frame.event];
-	if (handler) handler(frame.payload || {});
+	if (handler) handler(frame.payload || {}, streamMeta);
 }
 
 var connectOpts = {
 	onFrame: dispatchFrame,
 	onConnected: (hello) => {
+		var isReconnect = hasConnectedOnce;
+		hasConnectedOnce = true;
 		setStatus("connected", "");
 		var now = new Date();
 		var ts = now.toLocaleTimeString([], {
@@ -1148,10 +1307,37 @@ var connectOpts = {
 		if (S.sandboxInfo?.image_building) {
 			chatAddMsg("system", "Building sandbox image (installing packages)\u2026");
 		}
-		fetchModels();
-		fetchSessions();
-		fetchProjects();
-		prefetchChannels();
+		// Subscribe to all needed events (v4 protocol).
+		subscribeEvents(
+			Object.keys(eventHandlers).concat([
+				"tick",
+				"shutdown",
+				"auth.credentials_changed",
+				"exec.approval.requested",
+				"exec.approval.resolved",
+				"device.pair.requested",
+				"device.pair.resolved",
+				"node.pair.requested",
+				"node.pair.resolved",
+				"node.invoke.request",
+				"session",
+				"update.available",
+				"hooks.status",
+				"push.subscriptions",
+				"channel",
+				"metrics.update",
+				"skills.install.progress",
+				"mcp.status",
+			]),
+		);
+		// Keep initial hydration authoritative via app bootstrap/gon.
+		// On reconnect, force a fresh snapshot in case realtime events were missed.
+		if (isReconnect) {
+			fetchModels();
+			fetchSessions();
+			fetchProjects();
+			prefetchChannels();
+		}
 		sendRpc("logs.status", {}).then((res) => {
 			if (res?.ok) {
 				var p = res.payload || {};

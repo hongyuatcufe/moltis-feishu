@@ -2,13 +2,24 @@
 //!
 //! Backends handle the actual model loading and inference.
 
-use std::pin::Pin;
+use std::{
+    pin::Pin,
+    sync::atomic::{AtomicU64, Ordering},
+};
 
 use {anyhow::Result, async_trait::async_trait, tokio_stream::Stream};
 
 use moltis_agents::model::{ChatMessage, CompletionResponse, StreamEvent};
 
 use super::LocalLlmConfig;
+
+static LOADED_LLAMA_MODEL_BYTES: AtomicU64 = AtomicU64::new(0);
+
+/// Total bytes currently held by loaded llama.cpp model tensors.
+#[must_use]
+pub fn loaded_llama_model_bytes() -> u64 {
+    LOADED_LLAMA_MODEL_BYTES.load(Ordering::Relaxed)
+}
 
 /// Types of local LLM backends.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -57,8 +68,22 @@ pub trait LocalBackend: Send + Sync {
     /// Get the context window size.
     fn context_window(&self) -> u32;
 
+    /// Whether this backend supports grammar-constrained tool calling.
+    fn supports_tools(&self) -> bool {
+        false
+    }
+
     /// Run completion (non-streaming).
     async fn complete(&self, messages: &[ChatMessage]) -> Result<CompletionResponse>;
+
+    /// Run completion with tool schemas for grammar-constrained generation.
+    async fn complete_with_tools(
+        &self,
+        messages: &[ChatMessage],
+        _tools: &[serde_json::Value],
+    ) -> Result<CompletionResponse> {
+        self.complete(messages).await
+    }
 
     /// Run streaming completion.
     fn stream<'a>(
@@ -118,6 +143,12 @@ pub fn detect_backend_for_model(model_id: &str) -> BackendType {
         }
         // Otherwise use GGUF
         return BackendType::Gguf;
+    }
+
+    // If the model ID looks like a HuggingFace repo, treat it as an MLX model
+    // when MLX is available (e.g. "mlx-community/Qwen3.5-4B-MLX-4bit").
+    if super::models::is_hf_repo_id(model_id) && is_mlx_available() {
+        return BackendType::Mlx;
     }
 
     // Unknown model - fall back to system detection
@@ -228,7 +259,7 @@ pub mod gguf {
         tracing::{debug, info, warn},
     };
 
-    use moltis_agents::model::{ChatMessage, CompletionResponse, StreamEvent, Usage};
+    use moltis_agents::model::{ChatMessage, CompletionResponse, StreamEvent, ToolCall, Usage};
 
     use {
         super::{BackendType, LocalBackend, LocalLlmConfig},
@@ -238,17 +269,45 @@ pub mod gguf {
         },
     };
 
+    use crate::local_gguf::tool_grammar;
+
     /// Wrapper around `LlamaBackend` that opts into `Send + Sync`.
     struct SendSyncBackend(LlamaBackend);
 
     // SAFETY: LlamaBackend is an immutable init handle with no thread-local state.
+    #[allow(unsafe_code)]
     unsafe impl Send for SendSyncBackend {}
+    #[allow(unsafe_code)]
     unsafe impl Sync for SendSyncBackend {}
 
     /// GGUF backend implementation.
+    struct GgufModelHandle {
+        model: Mutex<LlamaModel>,
+        model_size_bytes: u64,
+    }
+
+    impl GgufModelHandle {
+        fn new(model: LlamaModel) -> Self {
+            let model_size_bytes = model.size();
+            super::LOADED_LLAMA_MODEL_BYTES
+                .fetch_add(model_size_bytes, std::sync::atomic::Ordering::Relaxed);
+            Self {
+                model: Mutex::new(model),
+                model_size_bytes,
+            }
+        }
+    }
+
+    impl Drop for GgufModelHandle {
+        fn drop(&mut self) {
+            super::LOADED_LLAMA_MODEL_BYTES
+                .fetch_sub(self.model_size_bytes, std::sync::atomic::Ordering::Relaxed);
+        }
+    }
+
     pub struct GgufBackend {
         backend: Arc<SendSyncBackend>,
-        model: Arc<Mutex<LlamaModel>>,
+        model: Arc<GgufModelHandle>,
         model_id: String,
         model_def: Option<&'static LocalModelDef>,
         context_size: u32,
@@ -293,17 +352,19 @@ pub mod gguf {
 
             let model = LlamaModel::load_from_file(&backend, &model_path, &model_params)
                 .map_err(|e| anyhow::anyhow!("failed to load GGUF model: {e}"))?;
+            let model_handle = Arc::new(GgufModelHandle::new(model));
 
             info!(
                 path = %model_path.display(),
                 model = %config.model_id,
                 context_size,
+                model_size_bytes = model_handle.model_size_bytes,
                 "loaded GGUF model"
             );
 
             Ok(Self {
                 backend: Arc::new(SendSyncBackend(backend)),
-                model: Arc::new(Mutex::new(model)),
+                model: model_handle,
                 model_id: config.model_id.clone(),
                 model_def,
                 context_size,
@@ -319,8 +380,16 @@ pub mod gguf {
         }
 
         /// Generate text synchronously.
-        fn generate_sync(&self, prompt: &str, max_tokens: u32) -> Result<(String, u32, u32)> {
-            let model = self.model.blocking_lock();
+        ///
+        /// When `tool_names` is non-empty, a lazy GBNF grammar sampler constrains
+        /// the output to valid `tool_call` fenced blocks.
+        fn generate_sync(
+            &self,
+            prompt: &str,
+            max_tokens: u32,
+            tool_names: &[&str],
+        ) -> Result<(String, u32, u32)> {
+            let model = self.model.model.blocking_lock();
             let backend = &self.backend.0;
 
             let batch_size: usize = 512;
@@ -362,10 +431,26 @@ pub mod gguf {
                     .map_err(|e| anyhow::anyhow!("prompt decode failed: {e}"))?;
             }
 
-            let mut sampler = LlamaSampler::chain_simple([
-                LlamaSampler::temp(self.temperature),
-                LlamaSampler::dist(42),
-            ]);
+            // Set up sampler chain with optional grammar constraint.
+            let mut samplers: Vec<LlamaSampler> = Vec::new();
+
+            if let Some(grammar_str) = tool_grammar::build_tool_call_grammar(tool_names) {
+                match LlamaSampler::grammar_lazy(&model, &grammar_str, "root", ["```tool_call"], &[
+                ]) {
+                    Ok(grammar_sampler) => {
+                        debug!("grammar-constrained sampling enabled for tool calls");
+                        samplers.push(grammar_sampler);
+                    },
+                    Err(e) => {
+                        warn!(%e, "failed to create grammar sampler, falling back to unconstrained");
+                    },
+                }
+            }
+
+            samplers.push(LlamaSampler::temp(self.temperature));
+            samplers.push(LlamaSampler::dist(42));
+
+            let mut sampler = LlamaSampler::chain_simple(samplers);
 
             let mut output_tokens = Vec::new();
             let mut pos = tokens.len() as i32;
@@ -425,9 +510,26 @@ pub mod gguf {
             self.context_size
         }
 
+        fn supports_tools(&self) -> bool {
+            true
+        }
+
         async fn complete(&self, messages: &[ChatMessage]) -> Result<CompletionResponse> {
+            self.complete_with_tools(messages, &[]).await
+        }
+
+        async fn complete_with_tools(
+            &self,
+            messages: &[ChatMessage],
+            tools: &[serde_json::Value],
+        ) -> Result<CompletionResponse> {
             let prompt = format_messages(messages, self.chat_template());
             let max_tokens = 4096u32;
+
+            let tool_names: Vec<String> = tools
+                .iter()
+                .filter_map(|t| t["name"].as_str().map(String::from))
+                .collect();
 
             let backend = Arc::clone(&self.backend);
             let model = Arc::clone(&self.model);
@@ -437,7 +539,8 @@ pub mod gguf {
             let model_def = self.model_def;
 
             let (text, input_tokens, output_tokens) = tokio::task::spawn_blocking(move || {
-                let provider = GgufBackend {
+                let tool_name_refs: Vec<&str> = tool_names.iter().map(String::as_str).collect();
+                let backend_inst = GgufBackend {
                     backend,
                     model,
                     model_id,
@@ -445,14 +548,33 @@ pub mod gguf {
                     context_size,
                     temperature,
                 };
-                provider.generate_sync(&prompt, max_tokens)
+                backend_inst.generate_sync(&prompt, max_tokens, &tool_name_refs)
             })
             .await
             .context("generation task panicked")??;
 
+            // Parse tool calls from the generated text.
+            let (parsed_calls, remaining_text) =
+                moltis_agents::tool_parsing::parse_tool_calls_from_text(&text);
+
+            let tool_calls: Vec<ToolCall> = parsed_calls
+                .into_iter()
+                .map(|tc| ToolCall {
+                    id: tc.id,
+                    name: tc.name,
+                    arguments: tc.arguments,
+                })
+                .collect();
+
+            let display_text = if tool_calls.is_empty() {
+                Some(text)
+            } else {
+                remaining_text.filter(|s| !s.is_empty())
+            };
+
             Ok(CompletionResponse {
-                text: Some(text),
-                tool_calls: vec![],
+                text: display_text,
+                tool_calls,
                 usage: Usage {
                     input_tokens,
                     output_tokens,
@@ -506,7 +628,7 @@ pub mod gguf {
     /// Streaming generation in a blocking context.
     fn stream_generate_sync(
         backend: &LlamaBackend,
-        model: &Mutex<LlamaModel>,
+        model: &GgufModelHandle,
         prompt: &str,
         max_tokens: u32,
         context_size: u32,
@@ -516,7 +638,7 @@ pub mod gguf {
         let batch_size: usize = 512;
 
         let result = (|| -> Result<(u32, u32)> {
-            let model = model.blocking_lock();
+            let model = model.model.blocking_lock();
 
             let ctx_params = LlamaContextParams::default()
                 .with_n_ctx(NonZeroU32::new(context_size))
@@ -737,18 +859,19 @@ pub mod mlx {
         let script = format!(
             r#"
 import mlx_lm
+from mlx_lm.sample_utils import make_sampler
 import json
 
 model, tokenizer = mlx_lm.load("{model_path}")
 prompt = {prompt_json}
+sampler = make_sampler(temp={temperature})
 response = mlx_lm.generate(
     model,
     tokenizer,
     prompt=prompt,
     max_tokens={max_tokens},
-    temp={temperature},
+    sampler=sampler,
 )
-# Estimate tokens (mlx-lm doesn't provide exact counts easily)
 input_tokens = len(tokenizer.encode(prompt))
 output_tokens = len(tokenizer.encode(response))
 print(json.dumps({{"text": response, "input_tokens": input_tokens, "output_tokens": output_tokens}}))
@@ -782,7 +905,7 @@ print(json.dumps({{"text": response, "input_tokens": input_tokens, "output_token
     }
 
     /// Strip common chat template stop tokens from model output.
-    fn strip_chat_template_tokens(text: &str) -> String {
+    pub(crate) fn strip_chat_template_tokens(text: &str) -> String {
         // Common stop tokens from various chat templates
         const STOP_TOKENS: &[&str] = &[
             "<|im_end|>",    // ChatML (Qwen, Yi, etc.)
@@ -950,10 +1073,14 @@ print(json.dumps({{"text": response, "input_tokens": input_tokens, "output_token
         let script = format!(
             r#"
 import mlx_lm
+from mlx_lm.sample_utils import make_sampler
 import sys
+
+STOP_TOKENS = frozenset(["<|im_end|>", "<|eot_id|>", "</s>", "<|end|>", "<|endoftext|>"])
 
 model, tokenizer = mlx_lm.load("{model_path}")
 prompt = {prompt_json}
+sampler = make_sampler(temp={temperature})
 
 input_tokens = len(tokenizer.encode(prompt))
 output_tokens = 0
@@ -963,12 +1090,13 @@ for token in mlx_lm.stream_generate(
     tokenizer,
     prompt=prompt,
     max_tokens={max_tokens},
-    temp={temperature},
+    sampler=sampler,
 ):
+    if str(token) in STOP_TOKENS:
+        break
     output_tokens += 1
     print(token, end="", flush=True)
 
-# Print token counts at the end (special marker)
 print(f"\n__TOKENS__:{{input_tokens}}:{{output_tokens}}", flush=True)
 "#,
             model_path = model_path,
@@ -1002,8 +1130,9 @@ print(f"\n__TOKENS__:{{input_tokens}}:{{output_tokens}}", flush=True)
                     output_tokens = parts[2].parse().unwrap_or(0);
                 }
             } else {
-                // Send as delta
-                if tx.blocking_send(StreamEvent::Delta(line)).is_err() {
+                // Strip any chat template stop tokens that slipped through
+                let cleaned = strip_chat_template_tokens(&line);
+                if !cleaned.is_empty() && tx.blocking_send(StreamEvent::Delta(cleaned)).is_err() {
                     break;
                 }
             }
@@ -1092,8 +1221,19 @@ print(f"\n__TOKENS__:{{input_tokens}}:{{output_tokens}}", flush=True)
             return Ok((model_path, None, context_size));
         }
 
+        // If the model ID looks like a HuggingFace repo, download it directly
+        if models::is_hf_repo_id(&config.model_id) {
+            info!(
+                model = config.model_id,
+                "downloading custom MLX model from HuggingFace repo"
+            );
+            let model_path = models::ensure_mlx_repo(&config.model_id, &config.cache_dir).await?;
+            let context_size = config.context_size.unwrap_or(8192);
+            return Ok((model_path, None, context_size));
+        }
+
         bail!(
-            "unknown MLX model '{}'. Use model_path for custom MLX models.",
+            "unknown MLX model '{}'. Use a HuggingFace repo ID (e.g. mlx-community/Model-Name) or model_path for custom MLX models.",
             config.model_id
         );
     }
@@ -1191,5 +1331,70 @@ mod tests {
         assert_ne!(python, homebrew);
         assert_eq!(python, MlxInstallation::PythonPackage);
         assert_eq!(homebrew, MlxInstallation::HomebrewCli);
+    }
+
+    // ── strip_chat_template_tokens tests ──────────────────────────────────
+
+    #[test]
+    fn test_strip_im_end_at_end() {
+        let input = "Hello! How can I help you today?<|im_end|>";
+        let result = mlx::strip_chat_template_tokens(input);
+        assert_eq!(result, "Hello! How can I help you today?");
+    }
+
+    #[test]
+    fn test_strip_eot_id_at_end() {
+        let result = mlx::strip_chat_template_tokens("Sure, here you go.<|eot_id|>");
+        assert_eq!(result, "Sure, here you go.");
+    }
+
+    #[test]
+    fn test_strip_eos_token_at_end() {
+        let result = mlx::strip_chat_template_tokens("Done.</s>");
+        assert_eq!(result, "Done.");
+    }
+
+    #[test]
+    fn test_strip_phi_end_token() {
+        let result = mlx::strip_chat_template_tokens("Answer<|end|>");
+        assert_eq!(result, "Answer");
+    }
+
+    #[test]
+    fn test_strip_endoftext_token() {
+        let result = mlx::strip_chat_template_tokens("Response<|endoftext|>");
+        assert_eq!(result, "Response");
+    }
+
+    #[test]
+    fn test_strip_mid_response_stop_token() {
+        let input = "Hello<|im_end|>\nassistant";
+        let result = mlx::strip_chat_template_tokens(input);
+        assert_eq!(result, "Hello");
+    }
+
+    #[test]
+    fn test_no_stop_tokens_unchanged() {
+        let input = "Just a normal response with no special tokens.";
+        let result = mlx::strip_chat_template_tokens(input);
+        assert_eq!(result, input);
+    }
+
+    #[test]
+    fn test_strip_empty_string() {
+        let result = mlx::strip_chat_template_tokens("");
+        assert_eq!(result, "");
+    }
+
+    #[test]
+    fn test_strip_only_stop_token() {
+        let result = mlx::strip_chat_template_tokens("<|im_end|>");
+        assert_eq!(result, "");
+    }
+
+    #[test]
+    fn test_strip_trailing_whitespace_after_token_removal() {
+        let result = mlx::strip_chat_template_tokens("Hello   <|im_end|>");
+        assert_eq!(result, "Hello");
     }
 }

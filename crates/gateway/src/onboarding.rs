@@ -11,6 +11,7 @@ pub struct GatewayOnboardingService {
     inner: moltis_onboarding::service::LiveOnboardingService,
     session_metadata: Arc<moltis_sessions::metadata::SqliteSessionMetadata>,
     agent_persona_store: Arc<crate::agent_persona::AgentPersonaStore>,
+    gateway_state: Arc<tokio::sync::OnceCell<Arc<crate::state::GatewayState>>>,
 }
 
 impl GatewayOnboardingService {
@@ -18,11 +19,13 @@ impl GatewayOnboardingService {
         inner: moltis_onboarding::service::LiveOnboardingService,
         session_metadata: Arc<moltis_sessions::metadata::SqliteSessionMetadata>,
         agent_persona_store: Arc<crate::agent_persona::AgentPersonaStore>,
+        gateway_state: Arc<tokio::sync::OnceCell<Arc<crate::state::GatewayState>>>,
     ) -> Self {
         Self {
             inner,
             session_metadata,
             agent_persona_store,
+            gateway_state,
         }
     }
 
@@ -210,9 +213,23 @@ impl OnboardingService for GatewayOnboardingService {
     }
 
     async fn identity_update(&self, params: Value) -> ServiceResult {
-        self.inner
+        let response = self
+            .inner
             .identity_update(params)
-            .map_err(ServiceError::message)
+            .map_err(ServiceError::message)?;
+
+        if let Some(state) = self.gateway_state.get()
+            && let Some(location_value) = response.get("user_location")
+        {
+            let mut inner = state.inner.write().await;
+            if location_value.is_null() {
+                inner.cached_location = None;
+            } else if let Some(location) = parse_geo_location(location_value) {
+                inner.cached_location = Some(location);
+            }
+        }
+
+        Ok(response)
     }
 
     async fn identity_update_soul(&self, soul: Option<String>) -> ServiceResult {
@@ -237,6 +254,8 @@ impl OnboardingService for GatewayOnboardingService {
                     skills = scan.skills_count,
                     memory = scan.memory_available,
                     channels = scan.channels_available,
+                    telegram_accounts = scan.telegram_accounts,
+                    discord_accounts = scan.discord_accounts,
                     sessions = scan.sessions_count,
                     "openclaw.scan: installation detected"
                 );
@@ -253,10 +272,14 @@ impl OnboardingService for GatewayOnboardingService {
                     "memory_files_count": scan.memory_files_count,
                     "channels_available": scan.channels_available,
                     "telegram_accounts": scan.telegram_accounts,
+                    "discord_accounts": scan.discord_accounts,
                     "sessions_count": scan.sessions_count,
                     "unsupported_channels": scan.unsupported_channels,
                     "agent_ids": scan.agent_ids,
                     "agents": scan.agents,
+                    "workspace_files_available": scan.workspace_files_available,
+                    "workspace_files_count": scan.workspace_files_count,
+                    "workspace_files_found": scan.workspace_files_found,
                 }))
             },
             None => {
@@ -311,6 +334,10 @@ impl OnboardingService for GatewayOnboardingService {
                 .get("sessions")
                 .and_then(|v| v.as_bool())
                 .unwrap_or(false),
+            workspace_files: params
+                .get("workspace_files")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false),
         };
 
         let config_dir = moltis_config::config_dir()
@@ -353,10 +380,48 @@ impl OnboardingService for GatewayOnboardingService {
     }
 }
 
+fn parse_geo_location(value: &Value) -> Option<moltis_config::GeoLocation> {
+    let latitude = value.get("latitude").and_then(|v| v.as_f64())?;
+    let longitude = value.get("longitude").and_then(|v| v.as_f64())?;
+    let place = value
+        .get("place")
+        .and_then(|v| v.as_str())
+        .map(|v| v.to_string());
+    let updated_at = value.get("updated_at").and_then(|v| v.as_i64());
+
+    Some(moltis_config::GeoLocation {
+        latitude,
+        longitude,
+        place,
+        updated_at,
+    })
+}
+
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn parse_geo_location_parses_valid_payload() {
+        let parsed = parse_geo_location(&serde_json::json!({
+            "latitude": 40.7128,
+            "longitude": -74.0060,
+            "place": "New York",
+            "updated_at": 123,
+        }))
+        .expect("location should parse");
+
+        assert_eq!(parsed.latitude, 40.7128);
+        assert_eq!(parsed.longitude, -74.0060);
+        assert_eq!(parsed.place.as_deref(), Some("New York"));
+        assert_eq!(parsed.updated_at, Some(123));
+    }
+
+    #[test]
+    fn parse_geo_location_rejects_invalid_payload() {
+        assert!(parse_geo_location(&serde_json::json!({ "latitude": 40.7 })).is_none());
+    }
 
     #[cfg(feature = "openclaw-import")]
     #[tokio::test]
@@ -416,6 +481,7 @@ mod tests {
                 pool.clone(),
             )),
             Arc::new(crate::agent_persona::AgentPersonaStore::new(pool)),
+            Arc::new(tokio::sync::OnceCell::new()),
         );
 
         service

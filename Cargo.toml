@@ -1,5 +1,59 @@
 [workspace]
+default-members = [
+  "apps/courier",
+  "crates/agents",
+  "crates/auth",
+  "crates/auto-reply",
+  "crates/benchmarks",
+  "crates/browser",
+  "crates/caldav",
+  "crates/canvas",
+  "crates/channels",
+  "crates/chat",
+  "crates/cli",
+  "crates/common",
+  "crates/config",
+  "crates/cron",
+  "crates/discord",
+  "crates/gateway",
+  "crates/graphql",
+  "crates/mcp",
+  "crates/media",
+  "crates/memory",
+  "crates/metrics",
+  "crates/msteams",
+  "crates/network-filter",
+  "crates/node-host",
+  "crates/oauth",
+  "crates/onboarding",
+  "crates/openclaw-import",
+  "crates/plugins",
+  "crates/projects",
+  "crates/protocol",
+  "crates/provider-setup",
+  "crates/providers",
+  "crates/qmd",
+  "crates/routing",
+  "crates/service-traits",
+  "crates/sessions",
+  "crates/skills",
+  "crates/slack",
+  "crates/swift-bridge",
+  "crates/tailscale",
+  "crates/telegram",
+  "crates/tls",
+  "crates/tools",
+  "crates/vault",
+  "crates/voice",
+  "crates/wasm-precompile",
+  "crates/wasm-tools/calc",
+  "crates/wasm-tools/web-fetch",
+  "crates/wasm-tools/web-search",
+  "crates/web",
+  "crates/whatsapp",
+]
 members = [
+  "apps/courier",
   "crates/agents",
   "crates/auth",
   "crates/auto-reply",
@@ -21,6 +75,7 @@ members = [
   "crates/memory",
   "crates/metrics",
   "crates/msteams",
+  "crates/node-host",
   "crates/oauth",
   "crates/onboarding",
   "crates/openclaw-import",
@@ -31,9 +86,11 @@ members = [
   "crates/providers",
   "crates/qmd",
   "crates/routing",
+  "crates/schema-export",
   "crates/service-traits",
   "crates/sessions",
   "crates/skills",
+  "crates/slack",
   "crates/swift-bridge",
   "crates/tailscale",
   "crates/telegram",
@@ -41,6 +98,10 @@ members = [
   "crates/tools",
   "crates/vault",
   "crates/voice",
+  "crates/wasm-precompile",
+  "crates/wasm-tools/calc",
+  "crates/wasm-tools/web-fetch",
+  "crates/wasm-tools/web-search",
   "crates/web",
   "crates/whatsapp",
 ]
@@ -59,9 +120,11 @@ edition      = "2024"
 license      = "MIT"
 repository   = "https://github.com/moltis-org/moltis"
 rust-version = "1.91"
-version      = "0.9.10"
+version      = "0.1.0"
 
 [workspace.dependencies]
+# APNS
+a2 = { default-features = false, features = ["ring"], version = "0.10" }
 # Async runtime
 tokio = { features = ["full"], version = "1" }
 # HTTP/WS server
@@ -69,6 +132,7 @@ askama     = "0.15"
 axum       = { features = ["ws"], version = "0.8" }
 axum-extra = "0.10"
 # Serialization
+postcard   = { features = ["alloc"], version = "1.1" }
 serde      = { features = ["derive"], version = "1" }
 serde_json = "1"
 # Error handling
@@ -88,7 +152,7 @@ clap = { features = ["derive", "env"], version = "4" }
 # Database
 sqlx = { features = ["migrate", "runtime-tokio", "sqlite"], version = "0.8" }
 # HTTP client
-reqwest = { features = ["json", "stream"], version = "0.12" }
+reqwest = { features = ["json", "multipart", "stream"], version = "0.12" }
 # UUID
 uuid = { features = ["v4"], version = "1" }
 # Async
@@ -109,6 +173,7 @@ toml_edit         = "0.22"
 # LLM provider crates (optional, behind feature flags)
 async-openai = { features = ["chat-completion"], version = "0.32" }
 base64       = "0.22"
+bytemuck     = { features = ["derive"], version = "1" }
 bytes        = "1"
 encoding_rs  = "0.8"
 fd-lock      = "4"
@@ -117,6 +182,7 @@ genai        = "0.5"
 async-graphql      = "7"
 async-graphql-axum = "7"
 gix                = "0.78"
+hmac               = "0.12"
 llama-cpp-2        = "0.1"
 mockito            = "1.7"
 open               = "5.3"
@@ -124,7 +190,9 @@ rand               = "0.9"
 regex              = "1"
 secrecy            = { features = ["serde"], version = "0.8" }
 prost              = "0.14"
+serenity           = { features = ["cache", "client", "gateway", "model", "rustls_backend"], version = "0.12" }
 sha2               = "0.10"
+slack-morphism     = { features = ["axum", "hyper"], version = "2.6" }
 sled               = "0.34"
 sysinfo            = "0.34"
 teloxide           = { features = ["macros"], version = "0.13" }
@@ -143,13 +211,14 @@ axum-server    = { features = ["tls-rustls"], version = "0.7" }
 rcgen          = "0.13"
 rustls         = { features = ["ring"], version = "0.23" }
 rustls-pemfile = "2"
-time           = "0.3"
+time           = { features = ["serde-human-readable"], version = "0.3" }
 tokio-rustls   = "0.26"
 # Cryptography / authentication
 argon2            = "0.5"
 chacha20poly1305  = { features = ["std"], version = "0.10" }
 p256              = "0.13"
 password-hash     = "0.5"
+subtle            = "2"
 webauthn-rs       = "0.5"
 webauthn-rs-proto = "0.5"
 # Web / HTTP utilities
@@ -170,7 +239,25 @@ metrics-tracing-context     = "0.16"
 # Content processing
 image          = { default-features = false, features = ["jpeg", "png", "webp"], version = "0.25" }
 ipnet          = "2"
+mdns-sd        = "0.18"
 pulldown-cmark = { default-features = false, version = "0.12" }
+# Code splitting (tree-sitter based)
+text-splitter          = { default-features = false, features = ["code"], version = "0.29" }
+tree-sitter-bash       = "0.25"
+tree-sitter-c          = "0.24"
+tree-sitter-cpp        = "0.23"
+tree-sitter-css        = "0.25"
+tree-sitter-go         = "0.25"
+tree-sitter-html       = "0.23"
+tree-sitter-java       = "0.23"
+tree-sitter-javascript = "0.25"
+tree-sitter-json       = "0.24"
+tree-sitter-md         = "0.5"
+tree-sitter-python     = "0.25"
+tree-sitter-ruby       = "0.23"
+tree-sitter-rust       = "0.24"
+tree-sitter-toml-ng    = "0.7"
+tree-sitter-typescript = "0.23"
 # Allocator
 tikv-jemallocator = "0.6"
 # Filesystem / archiving
@@ -184,10 +271,16 @@ json5                 = "0.4"
 notify-debouncer-full = "0.7"
 portable-pty          = "0.9"
 rstest                = "0.25"
+serial_test           = "3"
+shell-words           = "1"
 tar                   = "0.4"
 tempfile              = "3"
 walkdir               = "2"
+wasmtime              = { features = ["component-model"], version = "36" }
+wasmtime-wasi         = "36"
 which                 = "8"
+wit-bindgen           = "0.41"
+wit-bindgen-rt        = { features = ["bitflags"], version = "0.41" }
 # CalDAV / iCalendar
 hyper-rustls  = { features = ["http1", "native-tokio", "ring", "tls12"], version = "0.27" }
 icalendar     = "0.17"
@@ -208,6 +301,7 @@ moltis-chat            = { path = "crates/chat" }
 moltis-common          = { path = "crates/common" }
 moltis-config          = { path = "crates/config" }
 moltis-cron            = { path = "crates/cron" }
+moltis-discord         = { path = "crates/discord" }
 moltis-gateway         = { default-features = false, path = "crates/gateway" }
 moltis-graphql         = { path = "crates/graphql" }
 moltis-mcp             = { path = "crates/mcp" }
@@ -216,6 +310,8 @@ moltis-memory          = { path = "crates/memory" }
 moltis-feishu          = { path = "crates/feishu" }
 moltis-metrics         = { path = "crates/metrics" }
 moltis-msteams         = { path = "crates/msteams" }
+moltis-network-filter  = { default-features = false, path = "crates/network-filter" }
+moltis-node-host       = { path = "crates/node-host" }
 moltis-oauth           = { path = "crates/oauth" }
 moltis-onboarding      = { path = "crates/onboarding" }
 moltis-openclaw-import = { path = "crates/openclaw-import" }
@@ -226,9 +322,11 @@ moltis-provider-setup  = { path = "crates/provider-setup" }
 moltis-providers       = { features = ["provider-github-copilot", "provider-kimi-code", "provider-openai-codex"], path = "crates/providers" }
 moltis-qmd             = { path = "crates/qmd" }
 moltis-routing         = { path = "crates/routing" }
+moltis-schema-export   = { path = "crates/schema-export" }
 moltis-service-traits  = { path = "crates/service-traits" }
 moltis-sessions        = { path = "crates/sessions" }
 moltis-skills          = { path = "crates/skills" }
+moltis-slack           = { path = "crates/slack" }
 moltis-swift-bridge    = { path = "crates/swift-bridge" }
 moltis-tailscale       = { path = "crates/tailscale" }
 moltis-telegram        = { path = "crates/telegram" }

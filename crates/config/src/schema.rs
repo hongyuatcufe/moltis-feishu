@@ -7,6 +7,22 @@ use {
     serde::{Deserialize, Serialize},
 };
 
+// ── Reasoning effort ──────────────────────────────────────────────────────
+
+/// Reasoning/thinking effort level for models that support extended thinking.
+///
+/// Maps to provider-specific parameters:
+/// - **Anthropic**: `thinking.budget_tokens` (low=4096, medium=10240, high=32768)
+/// - **OpenAI**: `reasoning_effort` field on o-series models
+/// - **Other providers**: ignored if unsupported
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ReasoningEffort {
+    Low,
+    Medium,
+    High,
+}
+
 /// Agent identity (name, emoji, theme).
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(default)]
@@ -189,6 +205,7 @@ pub struct MoltisConfig {
     pub providers: ProvidersConfig,
     pub chat: ChatConfig,
     pub tools: ToolsConfig,
+    pub agents: AgentsConfig,
     pub skills: SkillsConfig,
     pub mcp: McpConfig,
     pub channels: ChannelsConfig,
@@ -206,11 +223,143 @@ pub struct MoltisConfig {
     pub voice: VoiceConfig,
     pub cron: CronConfig,
     pub caldav: CalDavConfig,
+    pub webhooks: WebhooksConfig,
     /// Environment variables injected into the Moltis process at startup.
     /// Useful for API keys in Docker where you can't easily set env vars.
     /// Process env vars take precedence (existing vars are not overwritten).
     #[serde(default)]
     pub env: HashMap<String, String>,
+}
+
+/// Agent spawn presets used by tools like `spawn_agent`.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct AgentsConfig {
+    /// Optional default preset name used when `spawn_agent.preset` is omitted.
+    pub default_preset: Option<String>,
+    /// Named spawn presets.
+    #[serde(default)]
+    pub presets: HashMap<String, AgentPreset>,
+}
+
+impl AgentsConfig {
+    /// Return a preset by name.
+    pub fn get_preset(&self, name: &str) -> Option<&AgentPreset> {
+        self.presets.get(name)
+    }
+}
+
+/// Tool policy for a preset (allow/deny specific tools).
+///
+/// When both `allow` and `deny` are specified, `allow` acts as a whitelist
+/// and `deny` further removes tools from that list.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct PresetToolPolicy {
+    /// Tools to allow (whitelist). If empty, all tools are allowed.
+    #[serde(default)]
+    pub allow: Vec<String>,
+    /// Tools to deny (blacklist). Applied after `allow`.
+    #[serde(default)]
+    pub deny: Vec<String>,
+}
+
+/// Scope for per-agent persistent memory.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum MemoryScope {
+    /// User-global: `~/.moltis/agent-memory/<preset>/`
+    #[default]
+    User,
+    /// Project-local: `.moltis/agent-memory/<preset>/`
+    Project,
+    /// Untracked local: `.moltis/agent-memory-local/<preset>/`
+    Local,
+}
+
+/// Persistent memory configuration for a preset.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct PresetMemoryConfig {
+    /// Memory scope: where the MEMORY.md is stored.
+    pub scope: MemoryScope,
+    /// Maximum lines to load from MEMORY.md (default: 200).
+    pub max_lines: usize,
+}
+
+impl Default for PresetMemoryConfig {
+    fn default() -> Self {
+        Self {
+            scope: MemoryScope::default(),
+            max_lines: 200,
+        }
+    }
+}
+
+/// Session access policy configuration for a preset.
+///
+/// Controls which sessions an agent can see and interact with via
+/// the `sessions_list`, `sessions_history`, and `sessions_send` tools.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct SessionAccessPolicyConfig {
+    /// Only see sessions with keys matching this prefix.
+    pub key_prefix: Option<String>,
+    /// Explicit session keys this agent can access (in addition to prefix).
+    #[serde(default)]
+    pub allowed_keys: Vec<String>,
+    /// Whether the agent can send messages to sessions.
+    #[serde(default = "default_true")]
+    pub can_send: bool,
+    /// Whether the agent can access sessions from other agents.
+    #[serde(default)]
+    pub cross_agent: bool,
+}
+
+impl Default for SessionAccessPolicyConfig {
+    fn default() -> Self {
+        Self {
+            key_prefix: None,
+            allowed_keys: Vec::new(),
+            can_send: true,
+            cross_agent: false,
+        }
+    }
+}
+
+/// Spawn policy preset for sub-agents.
+///
+/// Presets allow defining specialized agent configurations that can be
+/// selected when spawning sub-agents. Each preset can override identity,
+/// model, tool policies, and system prompt.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct AgentPreset {
+    /// Agent identity overrides.
+    pub identity: AgentIdentity,
+    /// Optional model override for this preset.
+    pub model: Option<String>,
+    /// Tool policy for this preset (allow/deny specific tools).
+    pub tools: PresetToolPolicy,
+    /// Restrict sub-agent to delegation/session/task tools only.
+    #[serde(default)]
+    pub delegate_only: bool,
+    /// Optional extra instructions appended to sub-agent system prompt.
+    pub system_prompt_suffix: Option<String>,
+    /// Maximum iterations for agent loop.
+    pub max_iterations: Option<u64>,
+    /// Timeout in seconds for the sub-agent.
+    pub timeout_secs: Option<u64>,
+    /// Session access policy for inter-agent communication.
+    pub sessions: Option<SessionAccessPolicyConfig>,
+    /// Persistent per-agent memory configuration.
+    pub memory: Option<PresetMemoryConfig>,
+    /// Reasoning/thinking effort level for models that support extended thinking.
+    ///
+    /// Controls extended thinking for models that support it (e.g. Claude Opus,
+    /// OpenAI o-series). Higher values enable deeper reasoning but increase
+    /// latency and token usage.
+    pub reasoning_effort: Option<ReasoningEffort>,
 }
 
 /// Voice configuration (TTS and STT).
@@ -648,14 +797,27 @@ pub struct ServerConfig {
     /// Defaults to 1000. Increase for busy servers, decrease for memory-constrained devices.
     #[serde(default = "default_log_buffer_size")]
     pub log_buffer_size: usize,
-    /// Optional GitHub repository URL used by the update checker.
+    /// URL of the releases manifest (`releases.json`) used by the update checker.
     ///
-    /// When unset, Moltis falls back to the package repository metadata.
-    pub update_repository_url: Option<String>,
+    /// Defaults to `https://www.moltis.org/releases.json` when unset.
+    pub update_releases_url: Option<String>,
+    /// Maximum number of SQLite pool connections. Lower values reduce memory
+    /// usage for personal gateways. Defaults to 5.
+    #[serde(default = "default_db_pool_max_connections")]
+    pub db_pool_max_connections: u32,
+    /// Base URL for the Shiki syntax-highlighting library loaded by the web UI.
+    ///
+    /// Defaults to `https://esm.sh/shiki@3.2.1?bundle` when unset.
+    /// Set to an alternative CDN or a self-hosted URL to override.
+    pub shiki_cdn_url: Option<String>,
 }
 
 fn default_log_buffer_size() -> usize {
     1000
+}
+
+fn default_db_pool_max_connections() -> u32 {
+    5
 }
 
 impl Default for ServerConfig {
@@ -666,7 +828,9 @@ impl Default for ServerConfig {
             http_request_logs: false,
             ws_request_logs: false,
             log_buffer_size: default_log_buffer_size(),
-            update_repository_url: None,
+            update_releases_url: None,
+            db_pool_max_connections: default_db_pool_max_connections(),
+            shiki_cdn_url: None,
         }
     }
 }
@@ -708,6 +872,13 @@ pub struct HeartbeatConfig {
     pub ack_max_chars: usize,
     /// Active hours window — heartbeats only run during this window.
     pub active_hours: ActiveHoursConfig,
+    /// Whether heartbeat replies should be delivered to a channel account.
+    #[serde(default)]
+    pub deliver: bool,
+    /// Channel account identifier for heartbeat delivery (e.g. a Telegram bot account id).
+    pub channel: Option<String>,
+    /// Destination chat/recipient id for heartbeat delivery.
+    pub to: Option<String>,
     /// Whether heartbeat runs inside a sandbox. Defaults to true.
     #[serde(default = "default_true")]
     pub sandbox_enabled: bool,
@@ -724,6 +895,9 @@ impl Default for HeartbeatConfig {
             prompt: None,
             ack_max_chars: 300,
             active_hours: ActiveHoursConfig::default(),
+            deliver: false,
+            channel: None,
+            to: None,
             sandbox_enabled: true,
             sandbox_image: None,
         }
@@ -768,6 +942,41 @@ impl Default for CronConfig {
         Self {
             rate_limit_max: 10,
             rate_limit_window_secs: 60,
+        }
+    }
+}
+
+/// Channel webhook middleware configuration.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct WebhooksConfig {
+    /// Per-account rate limiting settings.
+    pub rate_limit: WebhookRateLimitConfig,
+}
+
+/// Rate limiting configuration for channel webhooks.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct WebhookRateLimitConfig {
+    /// Whether rate limiting is enabled (default: true).
+    pub enabled: bool,
+    /// Override max requests per minute per account. When set, overrides the
+    /// channel's built-in default. Leave unset to use per-channel defaults
+    /// (Slack: 30/min, Teams: 60/min).
+    pub requests_per_minute: Option<u32>,
+    /// Override burst allowance per account.
+    pub burst: Option<u32>,
+    /// Interval in seconds between stale bucket cleanup (default: 300).
+    pub cleanup_interval_secs: u64,
+}
+
+impl Default for WebhookRateLimitConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            requests_per_minute: None,
+            burst: None,
+            cleanup_interval_secs: 300,
         }
     }
 }
@@ -865,17 +1074,21 @@ pub struct MemoryEmbeddingConfig {
     /// Memory backend: "builtin" (default) or "qmd" for QMD sidecar.
     pub backend: Option<String>,
     /// Embedding provider: "local", "ollama", "openai", "custom", or None for auto-detect.
+    #[serde(alias = "embedding_provider")]
     pub provider: Option<String>,
     /// Disable RAG embeddings and force keyword-only memory search.
     #[serde(default)]
     pub disable_rag: bool,
     /// Base URL for the embedding API (e.g. "http://localhost:11434/v1" for Ollama).
+    #[serde(alias = "embedding_base_url")]
     pub base_url: Option<String>,
     /// Model name (e.g. "nomic-embed-text" for Ollama, "text-embedding-3-small" for OpenAI).
+    #[serde(alias = "embedding_model")]
     pub model: Option<String>,
     /// API key (optional for local endpoints like Ollama).
     #[serde(
         default,
+        alias = "embedding_api_key",
         serialize_with = "serialize_option_secret",
         skip_serializing_if = "Option::is_none"
     )]
@@ -886,6 +1099,8 @@ pub struct MemoryEmbeddingConfig {
     /// Enable LLM reranking for hybrid search results.
     #[serde(default)]
     pub llm_reranking: bool,
+    /// Merge strategy for hybrid search: "rrf" (default) or "linear".
+    pub search_merge_strategy: Option<String>,
     /// Enable session export to memory for cross-run recall.
     #[serde(default)]
     pub session_export: bool,
@@ -977,7 +1192,7 @@ pub struct MetricsConfig {
     #[serde(default = "default_true")]
     pub prometheus_endpoint: bool,
     /// Maximum number of in-memory history points for time-series charts.
-    /// Points are sampled every 10 seconds. Defaults to 360 (1 hour).
+    /// Points are sampled every 30 seconds. Defaults to 360 (3 hours).
     /// Historical data is persisted to SQLite regardless of this setting.
     #[serde(default = "default_metrics_history_points")]
     pub history_points: usize,
@@ -1058,6 +1273,9 @@ pub struct McpServerEntry {
     /// URL for SSE transport. Required when `transport` is "sse".
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub url: Option<String>,
+    /// Custom headers for remote HTTP/SSE transport.
+    #[serde(default)]
+    pub headers: HashMap<String, String>,
     /// Manual OAuth override for servers that don't support standard discovery.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub oauth: Option<McpOAuthOverrideEntry>,
@@ -1080,12 +1298,25 @@ pub struct McpOAuthOverrideEntry {
     pub scopes: Vec<String>,
 }
 
+/// Built-in channel type identifiers recognised by the validator.
+///
+/// Kept in `moltis-config` (not `moltis-channels`) so the config crate stays
+/// independent of the channels crate while still validating channel names.
+pub const KNOWN_CHANNEL_TYPES: &[&str] = &[
+    "telegram",
+    "whatsapp",
+    "msteams",
+    "feishu",
+    "discord",
+    "slack",
+];
+
 /// Channel configuration.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct ChannelsConfig {
     /// Which channel types are offered in the web UI (onboarding + channels page).
-    /// Defaults to `["telegram"]`. Set to `["telegram", "msteams", "feishu"]` to opt in.
+    /// Defaults to `["telegram", "discord", "slack"]`. Add `"msteams"` or `"whatsapp"` to opt in.
     #[serde(
         default = "default_channels_offered",
         skip_serializing_if = "Vec::is_empty"
@@ -1103,10 +1334,46 @@ pub struct ChannelsConfig {
     /// Feishu bot accounts, keyed by account ID.
     #[serde(default)]
     pub feishu: HashMap<String, serde_json::Value>,
+    /// Discord bot accounts, keyed by account ID.
+    #[serde(default)]
+    pub discord: HashMap<String, serde_json::Value>,
+    /// Slack bot accounts, keyed by account ID.
+    #[serde(default)]
+    pub slack: HashMap<String, serde_json::Value>,
+    /// Additional channel types not covered by the named fields above.
+    ///
+    /// This allows new channel plugins to be configured without changing
+    /// this struct.
+    #[serde(flatten, default)]
+    pub extra: HashMap<String, HashMap<String, serde_json::Value>>,
+}
+
+impl ChannelsConfig {
+    /// All named channel fields as `(channel_type, accounts)` pairs.
+    fn named_fields(&self) -> [(&str, &HashMap<String, serde_json::Value>); 6] {
+        [
+            ("telegram", &self.telegram),
+            ("whatsapp", &self.whatsapp),
+            ("msteams", &self.msteams),
+            ("feishu", &self.feishu),
+            ("discord", &self.discord),
+            ("slack", &self.slack),
+        ]
+    }
+
+    /// Iterate all channel configs (named + extra) as `(channel_type, accounts)` pairs.
+    pub fn all_channel_configs(&self) -> Vec<(&str, &HashMap<String, serde_json::Value>)> {
+        let mut v: Vec<(&str, &HashMap<String, serde_json::Value>)> =
+            self.named_fields().into_iter().collect();
+        for (ct, accounts) in &self.extra {
+            v.push((ct.as_str(), accounts));
+        }
+        v
+    }
 }
 
 fn default_channels_offered() -> Vec<String> {
-    vec!["telegram".into()]
+    vec!["telegram".into(), "discord".into(), "slack".into()]
 }
 
 impl Default for ChannelsConfig {
@@ -1117,6 +1384,9 @@ impl Default for ChannelsConfig {
             whatsapp: HashMap::new(),
             msteams: HashMap::new(),
             feishu: HashMap::new(),
+            discord: HashMap::new(),
+            slack: HashMap::new(),
+            extra: HashMap::new(),
         }
     }
 }
@@ -1567,6 +1837,12 @@ pub struct BrowserConfig {
     /// When set, `persist_profile` is implicitly true.
     /// If not set and `persist_profile` is true, defaults to `data_dir()/browser/profile/`.
     pub profile_dir: Option<String>,
+    /// Hostname or IP used to connect to the browser container from the host.
+    /// Default: "127.0.0.1" (localhost). When running Moltis itself inside Docker,
+    /// set this to "host.docker.internal" or the Docker bridge gateway IP so
+    /// Moltis can reach the sibling browser container via the host's port mapping.
+    #[serde(default = "default_container_host")]
+    pub container_host: String,
 }
 
 fn default_sandbox_image() -> String {
@@ -1579,6 +1855,10 @@ const fn default_low_memory_threshold_mb() -> u64 {
 
 const fn default_persist_profile() -> bool {
     true
+}
+
+fn default_container_host() -> String {
+    "127.0.0.1".to_string()
 }
 
 impl Default for BrowserConfig {
@@ -1601,6 +1881,7 @@ impl Default for BrowserConfig {
             low_memory_threshold_mb: default_low_memory_threshold_mb(),
             persist_profile: default_persist_profile(),
             profile_dir: None,
+            container_host: default_container_host(),
         }
     }
 }
@@ -1615,6 +1896,11 @@ pub struct ExecConfig {
     pub security_level: String,
     pub allowlist: Vec<String>,
     pub sandbox: SandboxConfig,
+    /// Where to run commands: `"local"` (default) or `"node"`.
+    pub host: String,
+    /// Default node id or display name for remote execution (when `host = "node"`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub node: Option<String>,
 }
 
 impl Default for ExecConfig {
@@ -1626,6 +1912,8 @@ impl Default for ExecConfig {
             security_level: "allowlist".into(),
             allowlist: Vec::new(),
             sandbox: SandboxConfig::default(),
+            host: "local".into(),
+            node: None,
         }
     }
 }
@@ -1640,6 +1928,59 @@ pub struct ResourceLimitsConfig {
     pub cpu_quota: Option<f64>,
     /// Maximum number of PIDs.
     pub pids_max: Option<u32>,
+}
+
+/// Optional per-tool overrides for WASM fuel and memory.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ToolLimitOverrideConfig {
+    pub fuel: Option<u64>,
+    pub memory: Option<u64>,
+}
+
+/// Configurable WASM tool limits.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct WasmToolLimitsConfig {
+    pub default_memory: u64,
+    pub default_fuel: u64,
+    pub tool_overrides: HashMap<String, ToolLimitOverrideConfig>,
+}
+
+fn default_wasm_tool_overrides() -> HashMap<String, ToolLimitOverrideConfig> {
+    let mb = 1024_u64 * 1024_u64;
+    HashMap::from([
+        ("calc".to_string(), ToolLimitOverrideConfig {
+            fuel: Some(100_000),
+            memory: Some(2 * mb),
+        }),
+        ("web_fetch".to_string(), ToolLimitOverrideConfig {
+            fuel: Some(10_000_000),
+            memory: Some(32 * mb),
+        }),
+        ("web_search".to_string(), ToolLimitOverrideConfig {
+            fuel: Some(10_000_000),
+            memory: Some(32 * mb),
+        }),
+        ("show_map".to_string(), ToolLimitOverrideConfig {
+            fuel: Some(10_000_000),
+            memory: Some(64 * mb),
+        }),
+        ("location".to_string(), ToolLimitOverrideConfig {
+            fuel: Some(5_000_000),
+            memory: Some(16 * mb),
+        }),
+    ])
+}
+
+impl Default for WasmToolLimitsConfig {
+    fn default() -> Self {
+        Self {
+            default_memory: 16 * 1024 * 1024,
+            default_fuel: 1_000_000,
+            tool_overrides: default_wasm_tool_overrides(),
+        }
+    }
 }
 
 /// Persistence strategy for `/home/sandbox` in sandbox containers.
@@ -1659,6 +2000,9 @@ pub struct SandboxConfig {
     pub mode: String,
     pub scope: String,
     pub workspace_mount: String,
+    /// Optional host-visible path for Moltis `data_dir()` when creating
+    /// sandbox containers from inside another container.
+    pub host_data_dir: Option<String>,
     /// Persistence strategy for `/home/sandbox`: off, session, or shared.
     pub home_persistence: HomePersistenceConfig,
     /// Optional host directory for shared `/home/sandbox` persistence.
@@ -1667,14 +2011,29 @@ pub struct SandboxConfig {
     pub image: Option<String>,
     pub container_prefix: Option<String>,
     pub no_network: bool,
-    /// Backend: "auto" (default), "docker", or "apple-container".
-    /// "auto" prefers Apple Container on macOS when available, falls back to Docker.
+    /// Network policy: "blocked" (no network), "trusted" (proxy-filtered), "bypass" (unrestricted, no audit).
+    #[serde(default)]
+    pub network: String,
+    /// Domains allowed through the proxy in `trusted` mode.
+    #[serde(default)]
+    pub trusted_domains: Vec<String>,
+    /// Backend: "auto" (default), "docker", "podman", "apple-container",
+    /// "restricted-host", or "wasm".
+    /// "auto" prefers Apple Container on macOS, then Podman, then Docker,
+    /// then restricted-host. "wasm" uses Wasmtime + WASI for real sandboxed
+    /// execution.
     pub backend: String,
     pub resource_limits: ResourceLimitsConfig,
     /// Packages to install via `apt-get` in the sandbox image.
     /// Set to an empty list to skip provisioning.
     #[serde(default = "default_sandbox_packages")]
     pub packages: Vec<String>,
+    /// Fuel limit for WASM sandbox execution (default: 1 billion instructions).
+    pub wasm_fuel_limit: Option<u64>,
+    /// Epoch interruption interval in milliseconds for WASM sandbox (default: 100ms).
+    pub wasm_epoch_interval_ms: Option<u64>,
+    /// Optional per-tool WASM limits (fuel + memory).
+    pub wasm_tool_limits: Option<WasmToolLimitsConfig>,
 }
 
 /// Default packages installed in sandbox containers.
@@ -1702,6 +2061,13 @@ fn default_sandbox_packages() -> Vec<String> {
         "ruby",
         "ruby-dev",
         "golang-go",
+        "php-cli",
+        "php-mbstring",
+        "php-xml",
+        "php-curl",
+        "default-jdk",
+        "maven",
+        "perl",
         // Build toolchain & native deps
         "build-essential",
         "clang",
@@ -1719,6 +2085,8 @@ fn default_sandbox_packages() -> Vec<String> {
         "flex",
         "dpkg-dev",
         "fakeroot",
+        "cmake",
+        "ninja-build",
         // Compression & archiving
         "zip",
         "unzip",
@@ -1742,6 +2110,11 @@ fn default_sandbox_packages() -> Vec<String> {
         "tzdata",
         "shellcheck",
         "patchelf",
+        "git-lfs",
+        "gettext",
+        "lsb-release",
+        "software-properties-common",
+        "yamllint",
         // Text processing & search
         "ripgrep",
         "fd-find",
@@ -1803,6 +2176,11 @@ fn default_sandbox_packages() -> Vec<String> {
         "dos2unix",
         "miller",
         "datamash",
+        // Database clients
+        "postgresql-client",
+        "default-mysql-client",
+        // DevOps
+        "ansible",
         // GIS / OpenStreetMap / map generation
         "gdal-bin",
         "mapnik-utils",
@@ -1840,14 +2218,20 @@ impl Default for SandboxConfig {
             mode: "all".into(),
             scope: "session".into(),
             workspace_mount: "ro".into(),
+            host_data_dir: None,
             home_persistence: HomePersistenceConfig::default(),
             shared_home_dir: None,
             image: None,
             container_prefix: None,
-            no_network: true,
+            no_network: false,
+            network: "trusted".into(),
+            trusted_domains: Vec::new(),
             backend: "auto".into(),
             resource_limits: ResourceLimitsConfig::default(),
             packages: default_sandbox_packages(),
+            wasm_fuel_limit: None,
+            wasm_epoch_interval_ms: None,
+            wasm_tool_limits: None,
         }
     }
 }
@@ -1895,6 +2279,25 @@ pub struct ProvidersConfig {
     pub local_models: Vec<String>,
 }
 
+/// How tool calling is handled for a provider.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum ToolMode {
+    /// Detect automatically: native tool API if supported, else text-based fallback.
+    #[default]
+    Auto,
+    /// Force native tool calling API (provider must support it).
+    Native,
+    /// Force text-based tool calling (prompt injection + parse).
+    Text,
+    /// Disable all tool support for this provider.
+    Off,
+}
+
+const fn is_default_tool_mode(v: &ToolMode) -> bool {
+    matches!(v, ToolMode::Auto)
+}
+
 /// Streaming transport for provider response streams.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
@@ -1924,6 +2327,8 @@ pub struct ProviderEntry {
     pub api_key: Option<Secret<String>>,
 
     /// Override the base URL.
+    /// Accepts legacy `url` as an alias for compatibility.
+    #[serde(alias = "url")]
     pub base_url: Option<String>,
 
     /// Preferred model IDs for this provider.
@@ -1948,6 +2353,16 @@ pub struct ProviderEntry {
     /// (e.g., "anthropic-work", "anthropic-personal").
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub alias: Option<String>,
+
+    /// How tool calling is handled for this provider.
+    ///
+    /// - `auto` (default): use native tool API if the provider supports it,
+    ///   otherwise fall back to text-based prompt injection.
+    /// - `native`: force native tool calling.
+    /// - `text`: force text-based tool calling.
+    /// - `off`: disable all tools for this provider.
+    #[serde(default, skip_serializing_if = "is_default_tool_mode")]
+    pub tool_mode: ToolMode,
 }
 
 impl std::fmt::Debug for ProviderEntry {
@@ -1960,6 +2375,7 @@ impl std::fmt::Debug for ProviderEntry {
             .field("fetch_models", &self.fetch_models)
             .field("stream_transport", &self.stream_transport)
             .field("alias", &self.alias)
+            .field("tool_mode", &self.tool_mode)
             .finish()
     }
 }
@@ -1974,6 +2390,7 @@ impl Default for ProviderEntry {
             fetch_models: true,
             stream_transport: ProviderStreamTransport::Sse,
             alias: None,
+            tool_mode: ToolMode::Auto,
         }
     }
 }
@@ -2070,6 +2487,8 @@ impl ProvidersConfig {
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 #[cfg(test)]
 mod tests {
+    use secrecy::ExposeSecret;
+
     use super::*;
 
     #[test]
@@ -2140,6 +2559,53 @@ OPENROUTER_API_KEY = "sk-or-test"
     fn env_section_defaults_to_empty() {
         let config: MoltisConfig = toml::from_str("").unwrap();
         assert!(config.env.is_empty());
+    }
+
+    #[test]
+    fn agents_config_defaults_empty() {
+        let config: MoltisConfig = toml::from_str("").unwrap();
+        assert!(config.agents.default_preset.is_none());
+        assert!(config.agents.presets.is_empty());
+    }
+
+    #[test]
+    fn agents_config_parses_presets() {
+        let toml = r#"
+[agents]
+default_preset = "research"
+
+[agents.presets.research]
+model = "openai/gpt-5.2"
+delegate_only = false
+system_prompt_suffix = "Focus on evidence."
+max_iterations = 10
+timeout_secs = 120
+
+[agents.presets.research.identity]
+name = "scout"
+emoji = "🔍"
+theme = "thorough"
+
+[agents.presets.research.tools]
+allow = ["web_search", "web_fetch"]
+deny = ["exec"]
+"#;
+        let config: MoltisConfig = toml::from_str(toml).unwrap();
+        assert_eq!(config.agents.default_preset.as_deref(), Some("research"));
+        let preset = config.agents.get_preset("research").unwrap();
+        assert_eq!(preset.model.as_deref(), Some("openai/gpt-5.2"));
+        assert_eq!(preset.tools.allow.len(), 2);
+        assert_eq!(preset.tools.deny, vec!["exec".to_string()]);
+        assert!(!preset.delegate_only);
+        assert_eq!(
+            preset.system_prompt_suffix.as_deref(),
+            Some("Focus on evidence.")
+        );
+        assert_eq!(preset.identity.name.as_deref(), Some("scout"));
+        assert_eq!(preset.identity.emoji.as_deref(), Some("🔍"));
+        assert_eq!(preset.identity.theme.as_deref(), Some("thorough"));
+        assert_eq!(preset.max_iterations, Some(10));
+        assert_eq!(preset.timeout_secs, Some(120));
     }
 
     #[test]
@@ -2224,15 +2690,23 @@ OPENROUTER_API_KEY = "sk-or-test"
     }
 
     #[test]
-    fn channels_config_defaults_to_telegram_offered() {
+    fn channels_config_defaults_to_telegram_discord_slack_offered() {
         let config = ChannelsConfig::default();
-        assert_eq!(config.offered, vec!["telegram".to_string()]);
+        assert_eq!(config.offered, vec![
+            "telegram".to_string(),
+            "discord".to_string(),
+            "slack".to_string(),
+        ]);
     }
 
     #[test]
     fn channels_config_empty_toml_defaults_offered() {
         let config: ChannelsConfig = toml::from_str("").unwrap();
-        assert_eq!(config.offered, vec!["telegram".to_string()]);
+        assert_eq!(config.offered, vec![
+            "telegram".to_string(),
+            "discord".to_string(),
+            "slack".to_string(),
+        ]);
     }
 
     #[test]
@@ -2246,9 +2720,223 @@ OPENROUTER_API_KEY = "sk-or-test"
     }
 
     #[test]
+    fn channels_slack_is_named_field_not_extra() {
+        let toml_str = r#"
+[slack.my-bot]
+token = "xoxb-test"
+"#;
+        let config: ChannelsConfig = toml::from_str(toml_str).unwrap();
+        assert!(
+            config.slack.contains_key("my-bot"),
+            "slack should be in named field"
+        );
+        assert!(
+            !config.extra.contains_key("slack"),
+            "slack should not appear in extra"
+        );
+    }
+
+    #[test]
+    fn channels_all_channel_configs_includes_slack() {
+        let mut config = ChannelsConfig::default();
+        config
+            .slack
+            .insert("bot1".into(), serde_json::json!({"token": "xoxb-test"}));
+        let all = config.all_channel_configs();
+        let slack_entry = all.iter().find(|(ct, _)| *ct == "slack");
+        assert!(
+            slack_entry.is_some(),
+            "all_channel_configs should include slack"
+        );
+        assert!(slack_entry.unwrap().1.contains_key("bot1"));
+    }
+
+    #[test]
     fn sandbox_defaults_include_go_runtime() {
         let sandbox = SandboxConfig::default();
         assert!(sandbox.packages.iter().any(|pkg| pkg == "golang-go"));
         assert_eq!(sandbox.home_persistence, HomePersistenceConfig::Shared);
+        assert!(sandbox.host_data_dir.is_none());
+        assert!(sandbox.wasm_tool_limits.is_none());
+    }
+
+    #[test]
+    fn wasm_tool_limits_config_defaults() {
+        let limits = WasmToolLimitsConfig::default();
+        assert_eq!(limits.default_memory, 16 * 1024 * 1024);
+        assert_eq!(limits.default_fuel, 1_000_000);
+        assert!(limits.tool_overrides.contains_key("calc"));
+    }
+
+    #[test]
+    fn sandbox_wasm_tool_limits_deserialize() {
+        let config: SandboxConfig = toml::from_str(
+            r#"
+mode = "all"
+scope = "session"
+workspace_mount = "ro"
+host_data_dir = "/host/moltis-data"
+
+[wasm_tool_limits]
+default_memory = 2048
+default_fuel = 5000
+
+[wasm_tool_limits.tool_overrides.calc]
+fuel = 100
+memory = 300
+"#,
+        )
+        .unwrap();
+
+        assert_eq!(config.host_data_dir.as_deref(), Some("/host/moltis-data"));
+        let limits = config.wasm_tool_limits.unwrap();
+        assert_eq!(limits.default_memory, 2048);
+        assert_eq!(limits.default_fuel, 5000);
+        assert_eq!(
+            limits
+                .tool_overrides
+                .get("calc")
+                .and_then(|override_cfg| override_cfg.fuel),
+            Some(100)
+        );
+    }
+
+    #[test]
+    fn tool_mode_serde_round_trip() {
+        for (variant, expected_str) in [
+            (ToolMode::Auto, r#""auto""#),
+            (ToolMode::Native, r#""native""#),
+            (ToolMode::Text, r#""text""#),
+            (ToolMode::Off, r#""off""#),
+        ] {
+            let json = serde_json::to_string(&variant).unwrap();
+            assert_eq!(json, expected_str, "serialize {variant:?}");
+            let parsed: ToolMode = serde_json::from_str(&json).unwrap();
+            assert_eq!(parsed, variant, "deserialize {expected_str}");
+        }
+    }
+
+    #[test]
+    fn tool_mode_toml_round_trip() {
+        #[derive(Debug, Serialize, Deserialize, PartialEq)]
+        struct Wrapper {
+            mode: ToolMode,
+        }
+
+        for variant in [
+            ToolMode::Auto,
+            ToolMode::Native,
+            ToolMode::Text,
+            ToolMode::Off,
+        ] {
+            let w = Wrapper { mode: variant };
+            let toml_str = toml::to_string(&w).unwrap();
+            let parsed: Wrapper = toml::from_str(&toml_str).unwrap();
+            assert_eq!(parsed.mode, variant, "toml round-trip {variant:?}");
+        }
+    }
+
+    #[test]
+    fn tool_mode_default_is_auto() {
+        assert_eq!(ToolMode::default(), ToolMode::Auto);
+    }
+
+    #[test]
+    fn provider_entry_tool_mode_defaults_to_auto() {
+        let entry = ProviderEntry::default();
+        assert_eq!(entry.tool_mode, ToolMode::Auto);
+    }
+
+    #[test]
+    fn provider_entry_tool_mode_skipped_when_default() {
+        let entry = ProviderEntry::default();
+        let toml_str = toml::to_string(&entry).unwrap();
+        assert!(
+            !toml_str.contains("tool_mode"),
+            "tool_mode should be skipped when default: {toml_str}"
+        );
+    }
+
+    #[test]
+    fn provider_entry_tool_mode_persisted_when_non_default() {
+        let entry = ProviderEntry {
+            tool_mode: ToolMode::Text,
+            ..ProviderEntry::default()
+        };
+        let toml_str = toml::to_string(&entry).unwrap();
+        assert!(
+            toml_str.contains("tool_mode"),
+            "tool_mode should be present when non-default: {toml_str}"
+        );
+        let parsed: ProviderEntry = toml::from_str(&toml_str).unwrap();
+        assert_eq!(parsed.tool_mode, ToolMode::Text);
+    }
+
+    #[test]
+    fn provider_entry_url_alias_maps_to_base_url() {
+        let entry: ProviderEntry = toml::from_str(
+            r#"
+enabled = true
+url = "http://192.168.0.9:11434"
+"#,
+        )
+        .unwrap();
+
+        assert_eq!(entry.base_url.as_deref(), Some("http://192.168.0.9:11434"));
+    }
+
+    #[test]
+    fn memory_embedding_legacy_aliases_map_to_current_fields() {
+        let config: MoltisConfig = toml::from_str(
+            r#"
+[memory]
+embedding_provider = "custom"
+embedding_base_url = "http://moltis-embeddings:7997/v1"
+embedding_model = "intfloat/multilingual-e5-small"
+embedding_api_key = "secret-key"
+"#,
+        )
+        .unwrap();
+
+        assert_eq!(config.memory.provider.as_deref(), Some("custom"));
+        assert_eq!(
+            config.memory.base_url.as_deref(),
+            Some("http://moltis-embeddings:7997/v1")
+        );
+        assert_eq!(
+            config.memory.model.as_deref(),
+            Some("intfloat/multilingual-e5-small")
+        );
+        assert_eq!(
+            config
+                .memory
+                .api_key
+                .as_ref()
+                .map(ExposeSecret::expose_secret)
+                .map(String::as_str),
+            Some("secret-key")
+        );
+    }
+
+    #[test]
+    fn full_config_with_tool_mode() {
+        let toml_str = r#"
+[providers.ollama]
+enabled = true
+tool_mode = "text"
+
+[providers.anthropic]
+enabled = true
+tool_mode = "native"
+"#;
+        let config: MoltisConfig = toml::from_str(toml_str).unwrap();
+        assert_eq!(
+            config.providers.get("ollama").unwrap().tool_mode,
+            ToolMode::Text
+        );
+        assert_eq!(
+            config.providers.get("anthropic").unwrap().tool_mode,
+            ToolMode::Native
+        );
     }
 }

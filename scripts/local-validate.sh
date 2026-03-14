@@ -9,7 +9,7 @@ STATUS_PUBLISH_ENABLED=1
 
 remove_active_pid() {
   local target="$1"
-  local kept=()
+  local -a kept=()
   local pid
   for pid in "${ACTIVE_PIDS[@]}"; do
     if [[ "$pid" != "$target" ]]; then
@@ -176,10 +176,12 @@ biome_cmd="${LOCAL_VALIDATE_BIOME_CMD:-biome ci --diagnostic-level=error crates/
 i18n_cmd="${LOCAL_VALIDATE_I18N_CMD:-./scripts/i18n-check.sh}"
 zizmor_cmd="${LOCAL_VALIDATE_ZIZMOR_CMD:-./scripts/run-zizmor-resilient.sh . --min-severity high}"
 lint_cmd="${LOCAL_VALIDATE_LINT_CMD:-cargo +${nightly_toolchain} clippy -Z unstable-options --workspace --all-features --all-targets --timings -- -D warnings}"
-test_cmd="${LOCAL_VALIDATE_TEST_CMD:-cargo nextest run --all-features}"
+test_cmd="${LOCAL_VALIDATE_TEST_CMD:-cargo +${nightly_toolchain} nextest run --all-features --profile ci}"
 e2e_cmd="${LOCAL_VALIDATE_E2E_CMD:-cd crates/web/ui && if [ ! -d node_modules ]; then npm ci; fi && npm run e2e:install && npm run e2e}"
 coverage_cmd="${LOCAL_VALIDATE_COVERAGE_CMD:-cargo +${nightly_toolchain} llvm-cov --workspace --all-features --html}"
 macos_app_cmd="${LOCAL_VALIDATE_MACOS_APP_CMD:-./scripts/build-swift-bridge.sh && ./scripts/generate-swift-project.sh && ./scripts/lint-swift.sh && xcodebuild -project apps/macos/Moltis.xcodeproj -scheme Moltis -configuration Release -destination \"platform=macOS\" -derivedDataPath apps/macos/.derivedData-local-validate build}"
+ios_app_cmd="${LOCAL_VALIDATE_IOS_APP_CMD:-cargo run -p moltis-schema-export -- apps/ios/GraphQL/Schema/schema.graphqls && ./scripts/generate-ios-graphql.sh && ./scripts/generate-ios-project.sh && xcodebuild -project apps/ios/Moltis.xcodeproj -scheme Moltis -configuration Debug -destination \"generic/platform=iOS\" CODE_SIGNING_ALLOWED=NO build}"
+build_cmd="${LOCAL_VALIDATE_BUILD_CMD:-cargo +${nightly_toolchain} build --workspace --all-features --all-targets}"
 
 strip_all_features_flag() {
   local cmd="$1"
@@ -195,16 +197,20 @@ if [[ "$(uname -s)" == "Darwin" ]] && ! command -v nvcc >/dev/null 2>&1; then
     lint_cmd="cargo +${nightly_toolchain} clippy -Z unstable-options --workspace --all-targets --timings -- -D warnings"
   fi
   if [[ -z "${LOCAL_VALIDATE_TEST_CMD:-}" ]]; then
-    test_cmd="cargo nextest run"
+    test_cmd="cargo +${nightly_toolchain} nextest run --profile ci"
+  fi
+  if [[ -z "${LOCAL_VALIDATE_BUILD_CMD:-}" ]]; then
+    build_cmd="cargo +${nightly_toolchain} build --workspace --all-targets"
   fi
   if [[ -z "${LOCAL_VALIDATE_COVERAGE_CMD:-}" ]]; then
     coverage_cmd="cargo +${nightly_toolchain} llvm-cov --workspace --html"
   fi
   lint_cmd="$(strip_all_features_flag "$lint_cmd")"
   test_cmd="$(strip_all_features_flag "$test_cmd")"
+  build_cmd="$(strip_all_features_flag "$build_cmd")"
   coverage_cmd="$(strip_all_features_flag "$coverage_cmd")"
   echo "Detected macOS without nvcc; forcing non-CUDA local validation commands (no --all-features)." >&2
-  echo "Override with LOCAL_VALIDATE_LINT_CMD / LOCAL_VALIDATE_TEST_CMD / LOCAL_VALIDATE_COVERAGE_CMD if needed." >&2
+  echo "Override with LOCAL_VALIDATE_LINT_CMD / LOCAL_VALIDATE_TEST_CMD / LOCAL_VALIDATE_BUILD_CMD / LOCAL_VALIDATE_COVERAGE_CMD if needed." >&2
 fi
 
 ensure_zizmor() {
@@ -322,21 +328,45 @@ run_check() {
   local end
   local duration
   local log_file=""
+  local monitor_pid=""
 
   start="$(date +%s)"
   set_status pending "$context" "Running locally"
 
   if [[ "$context" == "local/test" && -z "${LOCAL_VALIDATE_TEST_VERBOSE:-}" ]]; then
     log_file="$(mktemp -t local-validate-test.XXXXXX.log)"
+    echo "[$context] running with captured output (set LOCAL_VALIDATE_TEST_VERBOSE=1 to stream test logs)."
     bash -lc "$cmd" >"$log_file" 2>&1 &
   else
     bash -lc "$cmd" &
   fi
 
   CURRENT_PID="$!"
+  if [[ -n "$log_file" ]]; then
+    (
+      local interval
+      local now
+      local elapsed
+      interval="${LOCAL_VALIDATE_PROGRESS_INTERVAL:-30}"
+      while kill -0 "$CURRENT_PID" 2>/dev/null; do
+        sleep "$interval"
+        if kill -0 "$CURRENT_PID" 2>/dev/null; then
+          now="$(date +%s)"
+          elapsed="$((now - start))"
+          echo "[$context] still running (${elapsed}s)."
+        fi
+      done
+    ) &
+    monitor_pid="$!"
+  fi
+
   if wait "$CURRENT_PID"; then
     end="$(date +%s)"
     duration="$((end - start))"
+    if [[ -n "$monitor_pid" ]]; then
+      kill "$monitor_pid" 2>/dev/null || true
+      wait "$monitor_pid" 2>/dev/null || true
+    fi
     CURRENT_PID=""
     if [[ -n "$log_file" ]]; then
       rm -f "$log_file"
@@ -346,6 +376,10 @@ run_check() {
   else
     end="$(date +%s)"
     duration="$((end - start))"
+    if [[ -n "$monitor_pid" ]]; then
+      kill "$monitor_pid" 2>/dev/null || true
+      wait "$monitor_pid" 2>/dev/null || true
+    fi
     CURRENT_PID=""
     if [[ -n "$log_file" ]]; then
       echo "[$context] failed; showing captured output:" >&2
@@ -387,6 +421,7 @@ run_check_async() {
 
 report_async_result() {
   local context="$1"
+  local pid="$2"
   local safe_context
   local result_file
   local status_word
@@ -397,10 +432,18 @@ report_async_result() {
   if [[ -f "$result_file" ]]; then
     read -r status_word duration <"$result_file"
     rm -f "$result_file"
-    remove_active_pid "$2"
+    remove_active_pid "$pid"
     echo "[$context] total ${duration}s"
     [[ "$status_word" == "ok" ]]
     return
+  fi
+
+  # Rare race fallback: if the child already exited and `wait` has already
+  # observed the status, treat missing timing metadata as non-fatal.
+  if ! kill -0 "$pid" 2>/dev/null; then
+    remove_active_pid "$pid"
+    echo "[$context] total unavailable (timing result missing)"
+    return 0
   fi
 
   echo "[$context] missing timing result" >&2
@@ -452,12 +495,33 @@ fi
 # Verify Cargo.lock is in sync (same as CI's `cargo fetch --locked`).
 run_check "local/lockfile" "cargo fetch --locked"
 
-# Keep lint/test sequential to maximize incremental compile reuse.
+# Ensure generated CSS exists (Tailwind output is not committed; worktrees and
+# fresh clones won't have it).
+if [[ ! -f crates/web/src/assets/style.css ]]; then
+  echo "style.css missing — building CSS with Tailwind..."
+  run_check "local/build-css" "just build-css"
+fi
+
+# Lint runs first to warm the cargo build cache (clippy compiles all targets).
 # These do not wait on local/zizmor, but local/zizmor remains required.
 run_check "local/lint" "$lint_cmd"
-run_check "local/test" "$test_cmd"
 
-# Native macOS app validation (macOS hosts only).
+# Build and pre-compile WASM guest components if the target is installed.
+# Release-profile builds (macOS app, swift-bridge) embed `.cwasm` artifacts
+# via include_bytes!.
+if rustup target list --installed 2>/dev/null | grep -q wasm32-wasip2; then
+  echo "Building WASM tool components..."
+  cargo build --target wasm32-wasip2 -p moltis-wasm-calc -p moltis-wasm-web-fetch -p moltis-wasm-web-search --release
+  cargo run -p moltis-wasm-precompile --release
+fi
+
+# Compile all workspace targets (bin + test harnesses) using the same nightly
+# toolchain as clippy. After clippy this is near-instant (shared build cache)
+# and means both nextest and E2E reuse these artifacts without recompilation.
+run_check "local/build" "$build_cmd"
+
+# Keep test and platform checks sequential to avoid overloading local machines.
+run_check "local/test" "$test_cmd"
 if [[ "${LOCAL_VALIDATE_SKIP_MACOS_APP:-0}" != "1" ]]; then
   if [[ "$(uname -s)" == "Darwin" ]]; then
     run_check "local/macos-app" "$macos_app_cmd"
@@ -468,6 +532,19 @@ if [[ "${LOCAL_VALIDATE_SKIP_MACOS_APP:-0}" != "1" ]]; then
 else
   echo "Skipping macOS app checks (LOCAL_VALIDATE_SKIP_MACOS_APP=1)."
   set_status success "local/macos-app" "Skipped via LOCAL_VALIDATE_SKIP_MACOS_APP"
+fi
+
+# iOS app validation (macOS hosts only — requires Xcode with iOS SDK).
+if [[ "${LOCAL_VALIDATE_SKIP_IOS_APP:-0}" != "1" ]]; then
+  if [[ "$(uname -s)" == "Darwin" ]]; then
+    run_check "local/ios-app" "$ios_app_cmd"
+  else
+    echo "Skipping iOS app checks (requires macOS host)."
+    set_status success "local/ios-app" "Skipped on non-macOS host"
+  fi
+else
+  echo "Skipping iOS app checks (LOCAL_VALIDATE_SKIP_IOS_APP=1)."
+  set_status success "local/ios-app" "Skipped via LOCAL_VALIDATE_SKIP_IOS_APP"
 fi
 
 # Gateway web UI e2e tests.

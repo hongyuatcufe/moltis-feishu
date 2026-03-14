@@ -9,14 +9,15 @@
 
 use {
     crate::sandbox::SandboxRouter,
-    anyhow::Result,
     async_trait::async_trait,
     moltis_agents::tool_registry::AgentTool,
     moltis_browser::{BrowserManager, BrowserRequest},
     std::sync::Arc,
-    tokio::sync::RwLock,
+    tokio::sync::{OnceCell, RwLock},
     tracing::debug,
 };
+
+use crate::error::Error;
 
 /// Browser automation tool for interacting with web pages.
 ///
@@ -29,7 +30,8 @@ use {
 /// tool will use the most recently created session. This prevents pool
 /// exhaustion from creating new browser instances on every call.
 pub struct BrowserTool {
-    manager: Arc<BrowserManager>,
+    config: moltis_browser::BrowserConfig,
+    manager: OnceCell<Arc<BrowserManager>>,
     sandbox_router: Option<Arc<SandboxRouter>>,
     /// Track the most recent session ID for automatic reuse.
     /// This prevents pool exhaustion when the LLM forgets to pass session_id.
@@ -37,10 +39,11 @@ pub struct BrowserTool {
 }
 
 impl BrowserTool {
-    /// Create a new browser tool wrapping a browser manager.
-    pub fn new(manager: Arc<BrowserManager>) -> Self {
+    /// Create a new browser tool from browser configuration.
+    pub fn new(config: moltis_browser::BrowserConfig) -> Self {
         Self {
-            manager,
+            config,
+            manager: OnceCell::new(),
             sandbox_router: None,
             last_session_id: RwLock::new(None),
         }
@@ -58,8 +61,7 @@ impl BrowserTool {
             return None;
         }
         let browser_config = moltis_browser::BrowserConfig::from(config);
-        let manager = Arc::new(BrowserManager::new(browser_config));
-        Some(Self::new(manager))
+        Some(Self::new(browser_config))
     }
 
     /// Clear the tracked session ID (e.g., after explicit close).
@@ -80,6 +82,34 @@ impl BrowserTool {
     async fn get_saved_session(&self) -> Option<String> {
         let guard = self.last_session_id.read().await;
         guard.clone()
+    }
+
+    async fn manager(&self) -> Arc<BrowserManager> {
+        Arc::clone(
+            self.manager
+                .get_or_init(|| async {
+                    let config = self.config.clone();
+                    match tokio::task::spawn_blocking(move || {
+                        // Browser detection/container cleanup can block.
+                        moltis_browser::detect::check_and_warn(config.chrome_path.as_deref());
+                        Arc::new(BrowserManager::new(config))
+                    })
+                    .await
+                    {
+                        Ok(manager) => manager,
+                        Err(error) => {
+                            tracing::warn!(
+                                %error,
+                                "browser tool warmup worker failed, falling back to inline initialization"
+                            );
+                            let config = self.config.clone();
+                            moltis_browser::detect::check_and_warn(config.chrome_path.as_deref());
+                            Arc::new(BrowserManager::new(config))
+                        },
+                    }
+                })
+                .await,
+        )
     }
 }
 
@@ -168,7 +198,7 @@ impl AgentTool for BrowserTool {
         })
     }
 
-    async fn execute(&self, params: serde_json::Value) -> Result<serde_json::Value> {
+    async fn execute(&self, params: serde_json::Value) -> anyhow::Result<serde_json::Value> {
         let mut params = params;
 
         // Browser sandbox mode follows the session sandbox mode from the shared router.
@@ -224,10 +254,11 @@ impl AgentTool for BrowserTool {
                         serde_json::from_value(params)?
                     } else {
                         // No URL either - return helpful error
-                        anyhow::bail!(
+                        return Err(Error::message(
                             "Missing required 'action' field. Use: \
-                             {{\"action\": \"navigate\", \"url\": \"https://...\"}} to open a page"
-                        );
+                             {\"action\": \"navigate\", \"url\": \"https://...\"} to open a page",
+                        )
+                        .into());
                     }
                 } else {
                     return Err(e.into());
@@ -236,7 +267,8 @@ impl AgentTool for BrowserTool {
             Err(e) => return Err(e.into()),
         };
 
-        let response = self.manager.handle_request(request).await;
+        let manager = self.manager().await;
+        let response = manager.handle_request(request).await;
 
         // Track the session ID for future reuse
         if response.success {
@@ -248,6 +280,16 @@ impl AgentTool for BrowserTool {
         }
 
         Ok(serde_json::to_value(&response)?)
+    }
+
+    async fn warmup(&self) -> anyhow::Result<()> {
+        let started = std::time::Instant::now();
+        let _ = self.manager().await;
+        debug!(
+            elapsed_ms = started.elapsed().as_millis(),
+            "browser tool warmup complete"
+        );
+        Ok(())
     }
 }
 

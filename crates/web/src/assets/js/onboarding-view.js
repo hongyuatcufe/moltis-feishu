@@ -23,7 +23,7 @@ import { t } from "./i18n.js";
 import { updateIdentity, validateIdentityFields } from "./identity-utils.js";
 import { detectPasskeyName } from "./passkey-detect.js";
 import { providerApiKeyHelp } from "./provider-key-help.js";
-import { startProviderOAuth } from "./provider-oauth.js";
+import { completeProviderOAuth, startProviderOAuth } from "./provider-oauth.js";
 import {
 	humanizeProbeError,
 	isModelServiceNotConfigured,
@@ -424,16 +424,31 @@ function AuthStep({ onNext, skippable }) {
 
 			<form onSubmit=${onOptionalPassword} class="flex flex-col gap-3">
 				<div>
-					<label class="text-xs text-[var(--muted)] mb-1 block">Password</label>
-					<input type="password" class="provider-key-input w-full"
-						value=${optPw} onInput=${(e) => setOptPw(e.target.value)}
-						placeholder="At least 8 characters" autofocus />
+					<label for="onboarding-passkey-password" class="text-xs text-[var(--muted)] mb-1 block">Password</label>
+					<input
+						id="onboarding-passkey-password"
+						type="password"
+						name="password"
+						autocomplete="new-password"
+						class="provider-key-input w-full"
+						value=${optPw}
+						onInput=${(e) => setOptPw(e.target.value)}
+						placeholder="At least 8 characters"
+						autofocus
+					/>
 				</div>
 				<div>
-					<label class="text-xs text-[var(--muted)] mb-1 block">Confirm password</label>
-					<input type="password" class="provider-key-input w-full"
-						value=${optPwConfirm} onInput=${(e) => setOptPwConfirm(e.target.value)}
-						placeholder="Repeat password" />
+					<label for="onboarding-passkey-password-confirm" class="text-xs text-[var(--muted)] mb-1 block">Confirm password</label>
+					<input
+						id="onboarding-passkey-password-confirm"
+						type="password"
+						name="confirm_password"
+						autocomplete="new-password"
+						class="provider-key-input w-full"
+						value=${optPwConfirm}
+						onInput=${(e) => setOptPwConfirm(e.target.value)}
+						placeholder="Repeat password"
+					/>
 				</div>
 				${error && html`<${ErrorPanel} message=${error} />`}
 				<div class="flex flex-wrap items-center gap-3 mt-1">
@@ -519,18 +534,33 @@ function AuthStep({ onNext, skippable }) {
 		${
 			method === "password" &&
 			html`<form onSubmit=${onPasswordSubmit} class="flex flex-col gap-3">
-			<div>
-				<label class="text-xs text-[var(--muted)] mb-1 block">Password${localhostOnly ? "" : " *"}</label>
-				<input type="password" class="provider-key-input w-full"
-					value=${password} onInput=${(e) => setPassword(e.target.value)}
-					placeholder=${localhostOnly ? "Optional on localhost" : "At least 8 characters"} autofocus />
-			</div>
-			<div>
-				<label class="text-xs text-[var(--muted)] mb-1 block">Confirm password</label>
-				<input type="password" class="provider-key-input w-full"
-					value=${confirm} onInput=${(e) => setConfirm(e.target.value)}
-					placeholder="Repeat password" />
-			</div>
+				<div>
+					<label for="onboarding-password" class="text-xs text-[var(--muted)] mb-1 block">Password${localhostOnly ? "" : " *"}</label>
+					<input
+						id="onboarding-password"
+						type="password"
+						name="password"
+						autocomplete="new-password"
+						class="provider-key-input w-full"
+						value=${password}
+						onInput=${(e) => setPassword(e.target.value)}
+						placeholder=${localhostOnly ? "Optional on localhost" : "At least 8 characters"}
+						autofocus
+					/>
+				</div>
+				<div>
+					<label for="onboarding-password-confirm" class="text-xs text-[var(--muted)] mb-1 block">Confirm password</label>
+					<input
+						id="onboarding-password-confirm"
+						type="password"
+						name="confirm_password"
+						autocomplete="new-password"
+						class="provider-key-input w-full"
+						value=${confirm}
+						onInput=${(e) => setConfirm(e.target.value)}
+						placeholder="Repeat password"
+					/>
+				</div>
 			${error && html`<${ErrorPanel} message=${error} />`}
 			<div class="flex flex-wrap items-center gap-3 mt-1">
 				<button type="submit" class="provider-btn" disabled=${saving}>
@@ -692,6 +722,9 @@ function OnboardingProviderRow({
 	setModelSearch,
 	oauthProvider,
 	oauthInfo,
+	oauthCallbackInput,
+	setOauthCallbackInput,
+	oauthSubmitting,
 	localProvider,
 	sysInfo,
 	localModels,
@@ -712,6 +745,7 @@ function OnboardingProviderRow({
 	onSaveKey,
 	onToggleModel,
 	onSaveModels,
+	onSubmitOAuthCallback,
 	onCancelOAuth,
 	onConfigureLocalModel,
 	onCancelLocal,
@@ -842,7 +876,7 @@ function OnboardingProviderRow({
 							onInput=${(e) => setModelSearch(e.target.value)} />`
 						: null
 				}
-				<div class="flex flex-col gap-1 max-h-56 overflow-y-auto">
+				<div class="flex flex-col gap-1">
 					${
 						filteredModels.length === 0
 							? html`<div class="text-xs text-[var(--muted)] py-4 text-center">No models match your search.</div>`
@@ -864,21 +898,41 @@ function OnboardingProviderRow({
 			</div>`
 				: null
 		}
-		${
-			isOAuth
-				? html`<div class="flex flex-col gap-2 mt-3 border-t border-[var(--border)] pt-3">
-				${
-					oauthInfo?.status === "device"
-						? html`<div class="text-sm text-[var(--text)]">
+			${
+				isOAuth
+					? html`<div class="flex flex-col gap-2 mt-3 border-t border-[var(--border)] pt-3">
+					${
+						oauthInfo?.status === "device"
+							? html`<div class="text-sm text-[var(--text)]">
 						Open <a href=${oauthInfo.uri} target="_blank" class="text-[var(--accent)] underline">${oauthInfo.uri}</a> and enter code:<strong class="font-mono ml-1">${oauthInfo.code}</strong>
 					</div>`
-						: html`<div class="text-sm text-[var(--muted)]">Waiting for authentication\u2026</div>`
-				}
-				${error ? html`<${ErrorPanel} message=${error} />` : null}
-				<button class="provider-btn provider-btn-secondary provider-btn-sm self-start" onClick=${onCancelOAuth}>Cancel</button>
-			</div>`
-				: null
-		}
+							: html`<div class="text-sm text-[var(--muted)]">Waiting for authentication\u2026</div>`
+					}
+					${
+						oauthInfo?.status === "device"
+							? null
+							: html`<div class="text-xs text-[var(--muted)]">If localhost callback fails, paste the redirect URL (or code#state) below.</div>
+							<input
+								type="text"
+								class="provider-key-input w-full"
+								placeholder="http://localhost:1455/auth/callback?code=...&state=..."
+								value=${oauthCallbackInput}
+								onInput=${(event) => setOauthCallbackInput(event.target.value)}
+								disabled=${oauthSubmitting}
+							/>
+							<button
+								class="provider-btn provider-btn-secondary provider-btn-sm self-start"
+								onClick=${() => onSubmitOAuthCallback(provider.name)}
+								disabled=${oauthSubmitting}
+							>
+								${oauthSubmitting ? "Submitting..." : "Submit Callback"}
+							</button>`
+					}
+					${error ? html`<${ErrorPanel} message=${error} />` : null}
+					<button class="provider-btn provider-btn-secondary provider-btn-sm self-start" onClick=${onCancelOAuth}>Cancel</button>
+				</div>`
+					: null
+			}
 		${
 			isLocal
 				? html`<div class="flex flex-col gap-2 mt-3 border-t border-[var(--border)] pt-3">
@@ -917,7 +971,7 @@ function OnboardingProviderRow({
 								: null
 						}
 						<div class="text-xs font-medium text-[var(--text-strong)]">Select a model</div>
-						<div class="flex flex-col gap-2 max-h-48 overflow-y-auto">
+						<div class="flex flex-col gap-2">
 							${
 								localModels.filter((m) => m.backend === selectedBackend).length === 0
 									? html`<div class="text-xs text-[var(--muted)] py-4 text-center">No models available for ${selectedBackend}</div>`
@@ -1064,6 +1118,8 @@ function ProviderStep({ onNext, onBack }) {
 
 	// OAuth state
 	var [oauthInfo, setOauthInfo] = useState(null);
+	var [oauthCallbackInput, setOauthCallbackInput] = useState("");
+	var [oauthSubmitting, setOauthSubmitting] = useState(false);
 	var oauthTimerRef = useRef(null);
 
 	// Local state
@@ -1140,6 +1196,8 @@ function ProviderStep({ onNext, onBack }) {
 		setModel("");
 		setError(null);
 		setOauthInfo(null);
+		setOauthCallbackInput("");
+		setOauthSubmitting(false);
 		setSysInfo(null);
 		setLocalModels([]);
 		if (oauthTimerRef.current) {
@@ -1388,6 +1446,8 @@ function ProviderStep({ onNext, onBack }) {
 	function startOAuth(p) {
 		setOauthProvider(p.name);
 		setOauthInfo({ status: "starting" });
+		setOauthCallbackInput("");
+		setOauthSubmitting(false);
 		startProviderOAuth(p.name).then((result) => {
 			if (result.status === "already") {
 				onOAuthAuthenticated(p.name);
@@ -1406,6 +1466,8 @@ function ProviderStep({ onNext, onBack }) {
 				setError(result.error || "Failed to start OAuth");
 				setOauthProvider(null);
 				setOauthInfo(null);
+				setOauthCallbackInput("");
+				setOauthSubmitting(false);
 			}
 		});
 	}
@@ -1415,6 +1477,8 @@ function ProviderStep({ onNext, onBack }) {
 
 		setOauthProvider(null);
 		setOauthInfo(null);
+		setOauthCallbackInput("");
+		setOauthSubmitting(false);
 
 		if (provModels.length > 0) {
 			setModelSelectProvider(providerName);
@@ -1444,6 +1508,8 @@ function ProviderStep({ onNext, onBack }) {
 				setError("OAuth timed out. Please try again.");
 				setOauthProvider(null);
 				setOauthInfo(null);
+				setOauthCallbackInput("");
+				setOauthSubmitting(false);
 				return;
 			}
 			sendRpc("providers.oauth.status", { provider: p.name }).then((res) => {
@@ -1463,7 +1529,38 @@ function ProviderStep({ onNext, onBack }) {
 		}
 		setOauthProvider(null);
 		setOauthInfo(null);
+		setOauthCallbackInput("");
+		setOauthSubmitting(false);
 		setError(null);
+	}
+
+	function submitOAuthCallback(providerName) {
+		var callback = oauthCallbackInput.trim();
+		if (!callback) {
+			setError("Paste the callback URL (or code#state) to continue.");
+			return;
+		}
+
+		setOauthSubmitting(true);
+		setError(null);
+		completeProviderOAuth(providerName, callback)
+			.then((res) => {
+				if (res?.ok) {
+					if (oauthTimerRef.current) {
+						clearInterval(oauthTimerRef.current);
+						oauthTimerRef.current = null;
+					}
+					onOAuthAuthenticated(providerName);
+					return;
+				}
+				setError(res?.error?.message || "Failed to complete OAuth callback.");
+			})
+			.catch((err) => {
+				setError(err?.message || "Failed to complete OAuth callback.");
+			})
+			.finally(() => {
+				setOauthSubmitting(false);
+			});
 	}
 
 	// ── Local model flow ─────────────────────────────────────
@@ -1532,7 +1629,7 @@ function ProviderStep({ onNext, onBack }) {
 			</div>`
 				: null
 		}
-		<div class="flex flex-col gap-2 max-h-80 overflow-y-auto">
+		<div class="flex flex-col gap-2">
 			${providers.map(
 				(p) => html`<${OnboardingProviderRow}
 				key=${p.name}
@@ -1543,10 +1640,13 @@ function ProviderStep({ onNext, onBack }) {
 				selectedModels=${configuring === p.name ? selectedModels : new Set()}
 				probeResults=${configuring === p.name ? probeResults : new Map()}
 				modelSearch=${configuring === p.name ? modelSearch : ""}
-				setModelSearch=${setModelSearch}
-				oauthProvider=${oauthProvider}
-				oauthInfo=${oauthInfo}
-				localProvider=${localProvider}
+					setModelSearch=${setModelSearch}
+					oauthProvider=${oauthProvider}
+					oauthInfo=${oauthInfo}
+					oauthCallbackInput=${oauthCallbackInput}
+					setOauthCallbackInput=${setOauthCallbackInput}
+					oauthSubmitting=${oauthSubmitting}
+					localProvider=${localProvider}
 				sysInfo=${sysInfo}
 				localModels=${localModels}
 				selectedBackend=${selectedBackend}
@@ -1563,10 +1663,11 @@ function ProviderStep({ onNext, onBack }) {
 				validationResult=${validationResults[p.name] || null}
 				onStartConfigure=${onStartConfigure}
 				onCancelConfigure=${closeAll}
-				onSaveKey=${onSaveKey}
-				onToggleModel=${onToggleModel}
-				onSaveModels=${onSaveSelectedModels}
-				onCancelOAuth=${cancelOAuth}
+					onSaveKey=${onSaveKey}
+					onToggleModel=${onToggleModel}
+					onSaveModels=${onSaveSelectedModels}
+					onSubmitOAuthCallback=${submitOAuthCallback}
+					onCancelOAuth=${cancelOAuth}
 				onConfigureLocalModel=${configureLocalModel}
 				onCancelLocal=${cancelLocal}
 			/>`,
@@ -2113,14 +2214,6 @@ function VoiceStep({ onNext, onBack }) {
 
 // ── Channel step ────────────────────────────────────────────
 
-function WhatsAppIconLg() {
-	return html`<svg width="28" height="28" viewBox="0 0 24 24" fill="none"
-    stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
-    <path d="M3 21l1.65-3.8a9 9 0 113.4 2.9L3 21" />
-    <path d="M9 10a.5.5 0 001 0V9a.5.5 0 00-1 0v1zm5 3a.5.5 0 001 0v-1a.5.5 0 00-1 0v1z" />
-  </svg>`;
-}
-
 function ChannelTypeSelector({ onSelect, offered }) {
 	return html`<div class="flex gap-3">
 		${
@@ -2133,7 +2226,7 @@ function ChannelTypeSelector({ onSelect, offered }) {
 		${
 			offered.has("whatsapp") &&
 			html`<button type="button" class="backend-card flex-1 items-center gap-3 py-6" onClick=${() => onSelect("whatsapp")}>
-			<${WhatsAppIconLg} />
+			<span class="icon icon-xl icon-whatsapp"></span>
 			<span class="text-sm font-medium text-[var(--text-strong)]">WhatsApp</span>
 		</button>`
 		}
@@ -2142,6 +2235,13 @@ function ChannelTypeSelector({ onSelect, offered }) {
 			html`<button type="button" class="backend-card flex-1 items-center gap-3 py-6" onClick=${() => onSelect("msteams")}>
 			<span class="icon icon-xl icon-msteams"></span>
 			<span class="text-sm font-medium text-[var(--text-strong)]">Microsoft Teams</span>
+		</button>`
+		}
+		${
+			offered.has("discord") &&
+			html`<button type="button" class="backend-card flex-1 items-center gap-3 py-6" onClick=${() => onSelect("discord")}>
+			<span class="icon icon-xl icon-discord"></span>
+			<span class="text-sm font-medium text-[var(--text-strong)]">Discord</span>
 		</button>`
 		}
 	</div>`;
@@ -2183,7 +2283,7 @@ function TelegramForm({ onConnected, error, setError }) {
 		});
 	}
 
-	return html`<form onSubmit=${onSubmit} class="flex flex-col gap-3 max-h-80 overflow-y-auto -mr-4 pr-4">
+	return html`<form onSubmit=${onSubmit} class="flex flex-col gap-3">
 		<div class="rounded-md border border-[var(--border)] bg-[var(--surface2)] p-3 text-xs text-[var(--muted)] flex flex-col gap-1">
 			<span class="font-medium text-[var(--text-strong)]">How to create a Telegram bot</span>
 			<span>1. Open <a href="https://t.me/BotFather" target="_blank" class="text-[var(--accent)] underline">@BotFather</a> in Telegram</span>
@@ -2295,7 +2395,7 @@ function TeamsForm({ onConnected, error, setError }) {
 		});
 	}
 
-	return html`<form onSubmit=${onSubmit} class="flex flex-col gap-3 max-h-80 overflow-y-auto -mr-4 pr-4">
+	return html`<form onSubmit=${onSubmit} class="flex flex-col gap-3">
 		<div class="rounded-md border border-[var(--border)] bg-[var(--surface2)] p-3 text-xs text-[var(--muted)] flex flex-col gap-1">
 			<span class="font-medium text-[var(--text-strong)]">Microsoft Teams setup</span>
 			<span>1. <a href="https://learn.microsoft.com/en-us/azure/bot-service/bot-service-quickstart-registration" target="_blank" class="text-[var(--accent)] underline">Create an Azure Bot registration</a> and copy the App ID + App Password.</span>
@@ -2346,6 +2446,117 @@ function TeamsForm({ onConnected, error, setError }) {
 	</form>`;
 }
 
+function discordInviteUrl(token) {
+	if (!token) return "";
+	var parts = token.split(".");
+	if (parts.length < 3) return "";
+	try {
+		var id = atob(parts[0]);
+		if (!/^\d+$/.test(id)) return "";
+		return `https://discord.com/oauth2/authorize?client_id=${id}&scope=bot&permissions=100352`;
+	} catch {
+		return "";
+	}
+}
+
+function DiscordForm({ onConnected, error, setError }) {
+	var [accountId, setAccountId] = useState("");
+	var [token, setToken] = useState("");
+	var [dmPolicy, setDmPolicy] = useState("allowlist");
+	var [allowlist, setAllowlist] = useState("");
+	var [saving, setSaving] = useState(false);
+
+	function onSubmit(e) {
+		e.preventDefault();
+		var v = validateChannelFields("discord", accountId, token);
+		if (!v.valid) {
+			setError(v.error);
+			return;
+		}
+		setError(null);
+		setSaving(true);
+		var allowlistEntries = allowlist
+			.trim()
+			.split(/\n/)
+			.map((s) => s.trim())
+			.filter(Boolean);
+		addChannel("discord", accountId.trim(), {
+			token: token.trim(),
+			dm_policy: dmPolicy,
+			mention_mode: "mention",
+			allowlist: allowlistEntries,
+		}).then((res) => {
+			setSaving(false);
+			if (res?.ok) {
+				onConnected(accountId.trim(), "discord");
+			} else {
+				setError((res?.error && (res.error.message || res.error.detail)) || "Failed to connect bot.");
+			}
+		});
+	}
+
+	var inviteUrl = discordInviteUrl(token);
+
+	return html`<form onSubmit=${onSubmit} class="flex flex-col gap-3">
+		<div class="rounded-md border border-[var(--border)] bg-[var(--surface2)] p-3 text-xs text-[var(--muted)] flex flex-col gap-1">
+			<span class="font-medium text-[var(--text-strong)]">How to set up a Discord bot</span>
+			<span>1. Go to the <a href="https://discord.com/developers/applications" target="_blank" class="text-[var(--accent)] underline">Discord Developer Portal</a></span>
+			<span>2. Create a new Application \u2192 Bot tab \u2192 copy the bot token</span>
+			<span>3. Enable <strong>Message Content Intent</strong> under Privileged Gateway Intents</span>
+			<span>4. Paste the token below \u2014 an invite link will be generated automatically</span>
+			<span>5. You can also DM the bot directly without adding it to a server</span>
+		</div>
+		<div>
+			<label class="text-xs text-[var(--muted)] mb-1 block">Account ID</label>
+			<input type="text" class="provider-key-input w-full"
+				value=${accountId} onInput=${(e) => setAccountId(e.target.value)}
+				placeholder="e.g. my_discord_bot"
+				autocomplete="off"
+				autocapitalize="none"
+				autocorrect="off"
+				spellcheck="false"
+				name="discord_account_id"
+				autofocus />
+		</div>
+		<div>
+			<label class="text-xs text-[var(--muted)] mb-1 block">Bot token</label>
+			<input type="password" class="provider-key-input w-full"
+				value=${token} onInput=${(e) => setToken(e.target.value)}
+				placeholder="Bot token from Developer Portal"
+				autocomplete="new-password"
+				autocapitalize="none"
+				autocorrect="off"
+				spellcheck="false"
+				name="discord_bot_token" />
+		</div>
+		${
+			inviteUrl &&
+			html`<div class="rounded-md border border-[var(--border)] bg-[var(--surface2)] p-2.5 text-xs flex flex-col gap-1">
+			<span class="font-medium text-[var(--text-strong)]">Invite bot to a server</span>
+			<span class="text-[var(--muted)]">Open this link to add the bot (Send Messages, Attach Files, Read Message History):</span>
+			<a href=${inviteUrl} target="_blank" class="text-[var(--accent)] underline break-all">${inviteUrl}</a>
+		</div>`
+		}
+		<div>
+			<label class="text-xs text-[var(--muted)] mb-1 block">DM Policy</label>
+			<select class="provider-key-input w-full cursor-pointer" value=${dmPolicy} onChange=${(e) => setDmPolicy(e.target.value)}>
+				<option value="allowlist">Allowlist only (recommended)</option>
+				<option value="open">Open (anyone)</option>
+				<option value="disabled">Disabled</option>
+			</select>
+		</div>
+		<div>
+			<label class="text-xs text-[var(--muted)] mb-1 block">Allowed Discord username(s)</label>
+			<textarea class="provider-key-input w-full" rows="2"
+				value=${allowlist} onInput=${(e) => setAllowlist(e.target.value)}
+				placeholder="your_username" style="resize:vertical;font-family:var(--font-body);" />
+			<div class="text-xs text-[var(--muted)] mt-1">One username per line. These users can DM your bot.</div>
+		</div>
+		${error && html`<${ErrorPanel} message=${error} />`}
+		<button type="submit" class="provider-btn" disabled=${saving}>${saving ? "Connecting\u2026" : "Connect Bot"}</button>
+	</form>`;
+}
+
 function WhatsAppForm({ onConnected, error, setError }) {
 	var [accountId, setAccountId] = useState("");
 	var [dmPolicy, setDmPolicy] = useState("allowlist");
@@ -2354,6 +2565,7 @@ function WhatsAppForm({ onConnected, error, setError }) {
 	var [pairingStarted, setPairingStarted] = useState(false);
 	var [qrData, setQrData] = useState(null);
 	var [qrSvg, setQrSvg] = useState(null);
+	var [qrSvgUrl, setQrSvgUrl] = useState(null);
 	var [pairingError, setPairingError] = useState(null);
 	var unsubRef = useRef(null);
 
@@ -2363,6 +2575,23 @@ function WhatsAppForm({ onConnected, error, setError }) {
 			if (unsubRef.current) unsubRef.current();
 		};
 	}, []);
+
+	useEffect(() => {
+		if (!qrSvg) {
+			setQrSvgUrl(null);
+			return undefined;
+		}
+		var nextUrl = null;
+		try {
+			nextUrl = URL.createObjectURL(new Blob([qrSvg], { type: "image/svg+xml" }));
+			setQrSvgUrl(nextUrl);
+		} catch (_err) {
+			setQrSvgUrl(null);
+		}
+		return () => {
+			if (nextUrl) URL.revokeObjectURL(nextUrl);
+		};
+	}, [qrSvg]);
 
 	function onStartPairing(e) {
 		e.preventDefault();
@@ -2412,8 +2641,6 @@ function WhatsAppForm({ onConnected, error, setError }) {
 		});
 	}
 
-	var qrSvgUrl = qrSvg ? `data:image/svg+xml;utf8,${encodeURIComponent(qrSvg)}` : null;
-
 	if (pairingStarted) {
 		return html`<div class="flex flex-col gap-4 items-center">
 			${
@@ -2437,7 +2664,7 @@ function WhatsAppForm({ onConnected, error, setError }) {
 		</div>`;
 	}
 
-	return html`<form onSubmit=${onStartPairing} class="flex flex-col gap-3 max-h-80 overflow-y-auto -mr-4 pr-4">
+	return html`<form onSubmit=${onStartPairing} class="flex flex-col gap-3">
 		<div class="rounded-md border border-[var(--border)] bg-[var(--surface2)] p-3 text-xs text-[var(--muted)] flex flex-col gap-1">
 			<span class="font-medium text-[var(--text-strong)]">Link your WhatsApp</span>
 			<span>1. Choose an account ID below (any name you like)</span>
@@ -2475,6 +2702,7 @@ function WhatsAppForm({ onConnected, error, setError }) {
 
 function channelDisplayLabel(type) {
 	if (type === "msteams") return "Microsoft Teams";
+	if (type === "discord") return "Discord";
 	if (type === "whatsapp") return "WhatsApp";
 	return "Telegram";
 }
@@ -2489,6 +2717,15 @@ function ChannelSuccess({ channelName, channelType: type, onAnother }) {
 				<div class="text-xs text-[var(--muted)] mt-0.5">${channelName} (${label}) is now linked to your agent.</div>
 			</div>
 		</div>
+		${
+			type === "discord" &&
+			html`<div class="rounded-md border border-[var(--border)] bg-[var(--surface2)] p-3 text-xs text-[var(--muted)] flex flex-col gap-1.5">
+			<span class="font-medium text-[var(--text-strong)]">Next steps</span>
+			<span>\u2022 <strong>Invite to a server:</strong> the invite link was shown on the previous screen. You can also generate one in the <a href="https://discord.com/developers/applications" target="_blank" class="text-[var(--accent)] underline">Developer Portal</a> \u2192 OAuth2 \u2192 URL Generator (scope: bot, permissions: Send Messages, Attach Files, Read Message History).</span>
+			<span>\u2022 <strong>DM the bot:</strong> search for the bot\u2019s username in Discord and click Message. Make sure your username is in the DM allowlist.</span>
+			<span>\u2022 <strong>In a server:</strong> @mention the bot to get a response.</span>
+		</div>`
+		}
 		<button type="button" class="text-xs text-[var(--accent)] cursor-pointer bg-transparent border-none underline self-start" onClick=${onAnother}>Connect another channel</button>
 	</div>`;
 }
@@ -2537,6 +2774,7 @@ function ChannelStep({ onNext, onBack }) {
 		${phase === "form" && selectedType === "telegram" && html`<${TelegramForm} onConnected=${onConnected} error=${error} setError=${setError} />`}
 		${phase === "form" && selectedType === "whatsapp" && html`<${WhatsAppForm} onConnected=${onConnected} error=${error} setError=${setError} />`}
 		${phase === "form" && selectedType === "msteams" && html`<${TeamsForm} onConnected=${onConnected} error=${error} setError=${setError} />`}
+		${phase === "form" && selectedType === "discord" && html`<${DiscordForm} onConnected=${onConnected} error=${error} setError=${setError} />`}
 		${phase === "success" && html`<${ChannelSuccess} channelName=${connectedName} channelType=${connectedType} onAnother=${onAnother} />`}
 		<div class="flex flex-wrap items-center gap-3 mt-1">
 			<button type="button" class="provider-btn provider-btn-secondary" onClick=${showBackSelector ? () => setPhase("select") : onBack}>${t("common:actions.back")}</button>
@@ -2598,21 +2836,47 @@ function OpenClawImportStep({ onNext, onBack }) {
 		memory: true,
 		channels: true,
 		sessions: true,
+		workspace_files: true,
 	});
 
 	useEffect(() => {
 		var cancelled = false;
-		sendRpc("openclaw.scan", {}).then((res) => {
+		var attempts = 0;
+		var retryTimer = null;
+
+		function loadScan() {
 			if (cancelled) return;
-			if (res?.ok) {
-				setScan(res.payload);
-			} else {
-				setError("Failed to scan OpenClaw installation");
-			}
-			setLoading(false);
-		});
+			sendRpc("openclaw.scan", {}).then((res) => {
+				if (cancelled) return;
+				if (res?.ok) {
+					setScan(res.payload);
+					setLoading(false);
+					return;
+				}
+
+				if (
+					(res?.error?.code === "UNAVAILABLE" || res?.error?.message === "WebSocket not connected") &&
+					attempts < WS_RETRY_LIMIT
+				) {
+					attempts += 1;
+					ensureWsConnected();
+					retryTimer = window.setTimeout(loadScan, WS_RETRY_DELAY_MS);
+					return;
+				}
+
+				setError(res?.error?.message || "Failed to scan OpenClaw installation");
+				setLoading(false);
+			});
+		}
+
+		ensureWsConnected();
+		loadScan();
 		return () => {
 			cancelled = true;
+			if (retryTimer) {
+				window.clearTimeout(retryTimer);
+				retryTimer = null;
+			}
 		};
 	}, []);
 
@@ -2688,6 +2952,16 @@ function OpenClawImportStep({ onNext, onBack }) {
 		</div>`;
 	}
 
+	var telegramAccounts = Number(scan.telegram_accounts) || 0;
+	var discordAccounts = Number(scan.discord_accounts) || 0;
+	var channelParts = [];
+	if (telegramAccounts > 0) channelParts.push(`${telegramAccounts} Telegram account(s)`);
+	if (discordAccounts > 0) channelParts.push(`${discordAccounts} Discord account(s)`);
+	var channelDetail = channelParts.length > 0 ? channelParts.join(", ") : null;
+	var unsupportedChannels = (scan.unsupported_channels || []).filter(
+		(channel) => String(channel).toLowerCase() !== "discord",
+	);
+
 	var categories = [
 		{
 			key: "identity",
@@ -2707,13 +2981,19 @@ function OpenClawImportStep({ onNext, onBack }) {
 			key: "channels",
 			label: "Channels",
 			available: scan.channels_available,
-			detail: `${scan.telegram_accounts} Telegram account(s)`,
+			detail: channelDetail,
 		},
 		{
 			key: "sessions",
 			label: "Sessions",
 			available: scan.sessions_count > 0,
 			detail: `${scan.sessions_count} session(s)`,
+		},
+		{
+			key: "workspace_files",
+			label: "Workspace Files",
+			available: scan.workspace_files_available,
+			detail: scan.workspace_files_found?.length > 0 ? scan.workspace_files_found.join(", ") : null,
 		},
 	];
 	var anySelected = categories.some((c) => c.available && selection[c.key]);
@@ -2724,7 +3004,11 @@ function OpenClawImportStep({ onNext, onBack }) {
 		<h2 class="text-lg font-medium text-[var(--text-strong)]">Import from OpenClaw</h2>
 		<p class="text-xs text-[var(--muted)] leading-relaxed">
 			We detected an OpenClaw installation at <code class="text-[var(--text)]">${scan.home_dir}</code>.
-			Select the data you'd like to import.
+			Select the data you'd like to bring into Moltis.
+		</p>
+		<p class="text-xs text-[var(--muted)] leading-relaxed">
+			This is a read-only copy \u2014 your OpenClaw installation will not be modified or removed.
+			You can keep using OpenClaw alongside Moltis, and re-import at any time from Settings.
 		</p>
 		${
 			workspaceMissing
@@ -2770,9 +3054,9 @@ function OpenClawImportStep({ onNext, onBack }) {
 				: null
 		}
 		${
-			scan.unsupported_channels?.length > 0
+			unsupportedChannels.length > 0
 				? html`<p class="text-xs text-[var(--muted)]">
-					Unsupported channels (coming soon): ${scan.unsupported_channels.join(", ")}
+					Unsupported channels (coming soon): ${unsupportedChannels.join(", ")}
 				</p>`
 				: null
 		}
@@ -2814,7 +3098,9 @@ function SummaryStep({ onBack, onFinish }) {
 					.then((r) => (r.ok ? r.json() : null))
 					.catch(() => null),
 				voiceEnabled ? fetchVoiceProviders().catch(() => null) : Promise.resolve(null),
-				fetch("/api/bootstrap")
+				fetch(
+					"/api/bootstrap?include_channels=false&include_sessions=false&include_models=false&include_projects=false&include_counts=false&include_identity=false",
+				)
 					.then((r) => (r.ok ? r.json() : null))
 					.catch(() => null),
 			]);
@@ -2855,7 +3141,7 @@ function SummaryStep({ onBack, onFinish }) {
 		<h2 class="text-lg font-medium text-[var(--text-strong)]">${t("onboarding:summary.title")}</h2>
 		<p class="text-xs text-[var(--muted)] leading-relaxed">Overview of your configuration. You can change any of these later in Settings.</p>
 
-		<div class="flex flex-col gap-2 max-h-80 overflow-y-auto -mr-4 pr-4">
+		<div class="flex flex-col gap-2">
 			<!-- Identity -->
 			<${SummaryRow}
 				icon=${data.identity?.user_name && data.identity?.name ? html`<${CheckIcon} />` : html`<${WarnIcon} />`}
@@ -2952,13 +3238,13 @@ function SummaryStep({ onBack, onFinish }) {
 			${
 				data.tailscale !== null
 					? html`<${SummaryRow}
-					icon=${data.tailscale?.connected ? html`<${CheckIcon} />` : data.tailscale?.installed ? html`<${WarnIcon} />` : html`<${InfoIcon} />`}
+					icon=${data.tailscale?.tailscale_up ? html`<${CheckIcon} />` : data.tailscale?.installed ? html`<${WarnIcon} />` : html`<${InfoIcon} />`}
 					label="Tailscale">
 					${
-						data.tailscale?.connected
+						data.tailscale?.tailscale_up
 							? html`Connected`
 							: data.tailscale?.installed
-								? html`Installed but not connected`
+								? html`Installed but not connected — <a href="/settings/tailscale" class="text-[var(--accent)] underline">Configure in Settings</a>`
 								: html`Not installed. Install Tailscale for secure remote access.`
 					}
 				<//>`
@@ -3126,7 +3412,7 @@ var containerRef = null;
 export function mountOnboarding(container) {
 	containerRef = container;
 	container.style.cssText =
-		"display:flex;align-items:center;justify-content:center;min-height:100vh;padding:max(0.75rem, env(safe-area-inset-top)) max(0.75rem, env(safe-area-inset-right)) max(0.75rem, env(safe-area-inset-bottom)) max(0.75rem, env(safe-area-inset-left));box-sizing:border-box;width:100%;max-width:100vw;overflow-x:hidden;";
+		"display:flex;align-items:flex-start;justify-content:center;min-height:100vh;padding:max(0.75rem, env(safe-area-inset-top)) max(0.75rem, env(safe-area-inset-right)) max(0.75rem, env(safe-area-inset-bottom)) max(0.75rem, env(safe-area-inset-left));box-sizing:border-box;width:100%;max-width:100vw;overflow-x:hidden;overflow-y:auto;";
 	render(html`<${OnboardingPage} />`, container);
 }
 

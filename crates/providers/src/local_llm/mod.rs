@@ -26,6 +26,13 @@ pub use {
     models::{LocalModelDef, ModelFormat},
 };
 
+/// Total bytes currently held by loaded llama.cpp tensors for local GGUF
+/// backends. This is updated when models are loaded/unloaded.
+#[must_use]
+pub fn loaded_llama_model_bytes() -> u64 {
+    backend::loaded_llama_model_bytes()
+}
+
 /// Configuration for the local LLM provider.
 #[derive(Debug, Clone)]
 pub struct LocalLlmConfig {
@@ -144,14 +151,13 @@ impl LlmProvider for LocalLlmProvider {
     }
 
     fn supports_tools(&self) -> bool {
-        // Local models don't support tool calling yet
-        false
+        true
     }
 
     async fn complete(
         &self,
         messages: &[ChatMessage],
-        _tools: &[serde_json::Value],
+        tools: &[serde_json::Value],
     ) -> Result<CompletionResponse> {
         self.ensure_loaded().await?;
 
@@ -159,7 +165,11 @@ impl LlmProvider for LocalLlmProvider {
         let backend = guard
             .as_ref()
             .ok_or_else(|| anyhow::anyhow!("backend should be loaded after ensure_loaded"))?;
-        backend.complete(messages).await
+        if tools.is_empty() {
+            backend.complete(messages).await
+        } else {
+            backend.complete_with_tools(messages, tools).await
+        }
     }
 
     fn stream(

@@ -1,4 +1,4 @@
-const { expect, test } = require("@playwright/test");
+const { expect, test } = require("../base-test");
 const { navigateAndWait, waitForWsConnected, watchPageErrors } = require("../helpers");
 
 function isRetryableRpcError(message) {
@@ -57,6 +57,9 @@ test.describe("Cron jobs page", () => {
 		await navigateAndWait(page, "/settings/heartbeat");
 
 		await expect(page.getByRole("heading", { name: /heartbeat/i })).toBeVisible();
+		await expect(page.getByText("Deliver to channel", { exact: true })).toBeVisible();
+		await expect(page.getByText("Channel Account", { exact: true })).toBeVisible();
+		await expect(page.getByText("Chat ID", { exact: true })).toBeVisible();
 		expect(pageErrors).toEqual([]);
 	});
 
@@ -100,6 +103,28 @@ test.describe("Cron jobs page", () => {
 
 		await expect(page.locator('[data-field="payloadKind"]')).toHaveValue("systemEvent");
 		await expect(page.locator('[data-field="target"]')).toHaveValue("main");
+		expect(pageErrors).toEqual([]);
+	});
+
+	test("cron modal clarifies schedule, timezone, and payload copy", async ({ page }) => {
+		const pageErrors = watchPageErrors(page);
+		await navigateAndWait(page, "/settings/crons");
+
+		await page.getByRole("button", { name: "+ Add Job", exact: true }).click();
+
+		await expect(page.locator('[data-field="schedKind"] option[value="at"]')).toHaveText("Run Once");
+		await expect(page.locator('[data-field="schedKind"]')).toHaveValue("cron");
+		await expect(page.getByText(/Leave blank to use UTC/)).toBeVisible();
+		await expect(page.getByText(/Adds this text to the main session as a system event/)).toBeVisible();
+		await expect(page.locator('[data-field="message"]')).toHaveAttribute(
+			"placeholder",
+			"Message sent to the main session",
+		);
+
+		await page.locator('[data-field="payloadKind"]').selectOption("agentTurn");
+		await expect(page.getByText(/Starts an isolated agent turn with this prompt/)).toBeVisible();
+		await expect(page.locator('[data-field="message"]')).toHaveAttribute("placeholder", "Prompt sent to the agent");
+
 		expect(pageErrors).toEqual([]);
 	});
 

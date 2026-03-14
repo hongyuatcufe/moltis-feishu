@@ -26,9 +26,18 @@ pub struct OpenAiCodexProvider {
 }
 
 const CODEX_MODELS_ENDPOINT: &str = "https://chatgpt.com/backend-api/codex/models";
-const CODEX_MODELS_CLIENT_VERSION: &str = env!("CARGO_PKG_VERSION");
+/// Report a client version that satisfies the Codex API's
+/// `minimal_client_version` filter so all available models are returned.
+/// Using the crate's own version (0.x) caused the API to hide newer models
+/// that require >= 0.98.0.  See <https://github.com/moltis-org/moltis/issues/354>.
+///
+/// **DO NOT** change this to `env!("CARGO_PKG_VERSION")` — the crate version
+/// is unrelated to the Codex client version and will break model discovery.
+const CODEX_MODELS_CLIENT_VERSION: &str = "1.0.0";
 
 const DEFAULT_CODEX_MODELS: &[(&str, &str)] = &[
+    ("gpt-5.4", "GPT-5.4"),
+    ("gpt-5.3-codex-spark", "GPT-5.3 Codex Spark"),
     ("gpt-5.3-codex", "GPT-5.3 Codex"),
     ("gpt-5.2-codex", "GPT-5.2 Codex"),
     ("gpt-5.2", "GPT-5.2"),
@@ -362,7 +371,7 @@ pub fn has_stored_tokens() -> bool {
     TokenStore::new().load("openai-codex").is_some() || load_codex_cli_tokens().is_some()
 }
 
-fn default_model_catalog() -> Vec<super::DiscoveredModel> {
+pub fn default_model_catalog() -> Vec<super::DiscoveredModel> {
     DEFAULT_CODEX_MODELS
         .iter()
         .map(|(id, name)| super::DiscoveredModel::new(*id, *name))
@@ -522,6 +531,23 @@ async fn fetch_models_from_api(
         anyhow::bail!("codex models API returned no models");
     }
     Ok(models)
+}
+
+/// Spawn model discovery in a background thread and return the receiver
+/// immediately, without blocking. Returns `None` if tokens are not configured.
+pub fn start_model_discovery() -> Option<mpsc::Receiver<anyhow::Result<Vec<super::DiscoveredModel>>>>
+{
+    let (access_token, account_id) = load_access_token_and_account_id().ok()?;
+    let (tx, rx) = mpsc::sync_channel(1);
+    std::thread::spawn(move || {
+        let result = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .map_err(anyhow::Error::from)
+            .and_then(|rt| rt.block_on(fetch_models_from_api(access_token, account_id)));
+        let _ = tx.send(result);
+    });
+    Some(rx)
 }
 
 fn fetch_models_blocking(
@@ -1277,6 +1303,28 @@ mod tests {
         assert_eq!(content[0]["text"], "describe this image");
         assert_eq!(content[1]["type"], "input_image");
         assert_eq!(content[1]["image_url"], "data:image/png;base64,ABC123");
+    }
+
+    #[test]
+    fn client_version_satisfies_codex_minimum() {
+        // Pin the constant so any change forces the test to be updated and
+        // the new value to be validated against the Codex API.
+        // See https://github.com/moltis-org/moltis/issues/354
+        assert_eq!(
+            CODEX_MODELS_CLIENT_VERSION, "1.0.0",
+            "If you need to change CODEX_MODELS_CLIENT_VERSION, ensure the new value \
+             satisfies the Codex API's minimal_client_version (>= 0.98.0). See issue #354."
+        );
+    }
+
+    #[test]
+    fn default_codex_models_includes_latest() {
+        let ids: Vec<&str> = DEFAULT_CODEX_MODELS.iter().map(|(id, _)| *id).collect();
+        assert!(ids.contains(&"gpt-5.4"), "missing gpt-5.4 in defaults");
+        assert!(
+            ids.contains(&"gpt-5.3-codex-spark"),
+            "missing gpt-5.3-codex-spark in defaults"
+        );
     }
 
     #[test]

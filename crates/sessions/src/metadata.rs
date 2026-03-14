@@ -49,6 +49,8 @@ pub struct SessionEntry {
     pub memory_owner_agent_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub agent_mode: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub node_id: Option<String>,
     #[serde(default)]
     pub version: u64,
 }
@@ -140,6 +142,7 @@ impl SessionMetadata {
                 agent_id: None,
                 memory_owner_agent_id: None,
                 agent_mode: None,
+                node_id: None,
                 version: 0,
             })
     }
@@ -241,6 +244,15 @@ impl SessionMetadata {
         }
     }
 
+    /// Assign (or unassign) a session to a remote node.
+    pub fn set_node_id(&mut self, key: &str, node_id: Option<String>) {
+        if let Some(entry) = self.entries.get_mut(key) {
+            entry.node_id = node_id;
+            entry.updated_at = now_ms();
+            entry.version += 1;
+        }
+    }
+
     /// Mark/unmark a session as archived.
     pub fn set_archived(&mut self, key: &str, archived: bool) {
         if let Some(entry) = self.entries.get_mut(key) {
@@ -323,6 +335,7 @@ struct SessionRow {
     agent_id: Option<String>,
     memory_owner_agent_id: Option<String>,
     agent_mode: Option<String>,
+    node_id: Option<String>,
     version: i64,
 }
 
@@ -350,6 +363,7 @@ impl From<SessionRow> for SessionEntry {
             agent_id: r.agent_id,
             memory_owner_agent_id: r.memory_owner_agent_id,
             agent_mode: r.agent_mode,
+            node_id: r.node_id,
             version: r.version as u64,
         }
     }
@@ -415,6 +429,7 @@ impl SqliteSessionMetadata {
                 agent_id            TEXT,
                 memory_owner_agent_id TEXT,
                 agent_mode          TEXT,
+                node_id             TEXT,
                 version             INTEGER NOT NULL DEFAULT 0
             )"#,
         )
@@ -426,6 +441,10 @@ impl SqliteSessionMetadata {
             .await
             .ok();
         sqlx::query("ALTER TABLE sessions ADD COLUMN agent_mode TEXT")
+            .execute(pool)
+            .await
+            .ok();
+        sqlx::query("ALTER TABLE sessions ADD COLUMN node_id TEXT")
             .execute(pool)
             .await
             .ok();
@@ -581,6 +600,9 @@ impl SqliteSessionMetadata {
             .execute(&self.pool)
             .await
             .ok();
+        self.emit(crate::session_events::SessionEvent::Patched {
+            session_key: key.to_string(),
+        });
     }
 
     pub async fn set_project_id(&self, key: &str, project_id: Option<String>) {
@@ -720,6 +742,23 @@ impl SqliteSessionMetadata {
             "UPDATE sessions SET agent_mode = ?, updated_at = ?, version = version + 1 WHERE key = ?",
         )
         .bind(mode)
+        .bind(now)
+        .bind(key)
+        .execute(&self.pool)
+        .await?;
+        self.emit(crate::session_events::SessionEvent::Patched {
+            session_key: key.to_string(),
+        });
+        Ok(())
+    }
+
+    /// Assign (or unassign) a session to a remote node.
+    pub async fn set_node_id(&self, key: &str, node_id: Option<&str>) -> Result<()> {
+        let now = now_ms() as i64;
+        sqlx::query(
+            "UPDATE sessions SET node_id = ?, updated_at = ?, version = version + 1 WHERE key = ?",
+        )
+        .bind(node_id)
         .bind(now)
         .bind(key)
         .execute(&self.pool)
@@ -1142,6 +1181,34 @@ mod tests {
         let entry = meta.get("main").await.unwrap();
         assert_eq!(entry.message_count, 8);
         assert_eq!(entry.last_seen_message_count, 5);
+    }
+
+    #[tokio::test]
+    async fn test_sqlite_mark_seen_emits_patched_event() {
+        let pool = sqlite_pool().await;
+        let bus = crate::session_events::SessionEventBus::new();
+        let meta = SqliteSessionMetadata::with_event_bus(pool, bus.clone());
+        let mut rx = bus.subscribe();
+
+        meta.upsert("main", None).await.unwrap();
+        let created = rx.recv().await.unwrap();
+        assert!(
+            matches!(
+                created,
+                crate::session_events::SessionEvent::Created { session_key } if session_key == "main"
+            ),
+            "expected created event after upsert"
+        );
+
+        meta.mark_seen("main").await;
+        let patched = rx.recv().await.unwrap();
+        assert!(
+            matches!(
+                patched,
+                crate::session_events::SessionEvent::Patched { session_key } if session_key == "main"
+            ),
+            "expected patched event after mark_seen"
+        );
     }
 
     #[test]

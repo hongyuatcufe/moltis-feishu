@@ -20,6 +20,8 @@ import { initImages, teardownImages } from "./page-images.js";
 import { initLogs, teardownLogs } from "./page-logs.js";
 import { initMcp, teardownMcp } from "./page-mcp.js";
 import { initMonitoring, teardownMonitoring } from "./page-metrics.js";
+import { initNetworkAudit, teardownNetworkAudit } from "./page-network-audit.js";
+import { initNodes, teardownNodes } from "./page-nodes.js";
 import { initProviders, teardownProviders } from "./page-providers.js";
 import { initSkills, teardownSkills } from "./page-skills.js";
 import { initTerminal, teardownTerminal } from "./page-terminal.js";
@@ -112,6 +114,12 @@ var sections = [
 		page: true,
 	},
 	{
+		id: "nodes",
+		label: "Nodes",
+		icon: html`<span class="icon icon-nodes"></span>`,
+		page: true,
+	},
+	{
 		id: "environment",
 		label: "Environment",
 		icon: html`<span class="icon icon-terminal"></span>`,
@@ -152,7 +160,13 @@ var sections = [
 	{
 		id: "tailscale",
 		label: "Tailscale",
-		icon: html`<span class="icon icon-globe"></span>`,
+		icon: html`<span class="icon icon-tailscale"></span>`,
+	},
+	{
+		id: "network-audit",
+		label: "Network Audit",
+		icon: html`<span class="icon icon-shield-check"></span>`,
+		page: true,
 	},
 	{
 		id: "sandboxes",
@@ -194,7 +208,7 @@ var sections = [
 	{
 		id: "import",
 		label: "OpenClaw Import",
-		icon: html`<span class="icon icon-link"></span>`,
+		icon: html`<span class="icon icon-openclaw"></span>`,
 	},
 	{
 		id: "voice",
@@ -202,34 +216,11 @@ var sections = [
 		icon: html`<span class="icon icon-microphone"></span>`,
 	},
 	{ group: "Systems" },
-	{
-		id: "terminal",
-		label: "Terminal",
-		icon: html`<span class="icon icon-terminal"></span>`,
-		page: true,
-	},
-	{
-		id: "monitoring",
-		label: "Monitoring",
-		icon: html`<span class="icon icon-chart-bar"></span>`,
-		page: true,
-	},
-	{
-		id: "logs",
-		label: "Logs",
-		icon: html`<span class="icon icon-document"></span>`,
-		page: true,
-	},
-	{
-		id: "graphql",
-		label: "GraphQL",
-		icon: html`<span class="icon icon-graphql"></span>`,
-	},
-	{
-		id: "config",
-		label: "Configuration",
-		icon: html`<span class="icon icon-code"></span>`,
-	},
+	{ id: "terminal", label: "Terminal", page: true },
+	{ id: "monitoring", label: "Monitoring", page: true },
+	{ id: "logs", label: "Logs", page: true },
+	{ id: "graphql", label: "GraphQL" },
+	{ id: "config", label: "Configuration" },
 ];
 
 function getVisibleSections() {
@@ -271,6 +262,7 @@ function SettingsSidebar() {
 					: html`<button
 							key=${s.id}
 							class="settings-nav-item ${activeSection.value === s.id ? "active" : ""}"
+							data-section=${s.id}
 							onClick=${() => {
 								if (isMobileViewport()) {
 									mobileSidebarVisible.value = false;
@@ -279,7 +271,6 @@ function SettingsSidebar() {
 								navigate(settingsPath(s.id));
 							}}
 						>
-							${s.icon}
 							${s.label}
 						</button>`,
 			)}
@@ -334,9 +325,12 @@ function IdentitySection() {
 		setSoul(id.soul || "");
 	}, [id]);
 
+	var savedTimerRef = useRef(null);
 	function flashSaved() {
+		if (savedTimerRef.current) clearTimeout(savedTimerRef.current);
 		setSaved(true);
-		setTimeout(() => {
+		savedTimerRef.current = setTimeout(() => {
+			savedTimerRef.current = null;
 			setSaved(false);
 			rerender();
 		}, 2000);
@@ -448,12 +442,12 @@ function IdentitySection() {
 		});
 	}
 
-	function onNameBlur() {
-		autoSaveNameField("name", name);
+	function onNameBlur(e) {
+		autoSaveNameField("name", e.target.value);
 	}
 
-	function onUserNameBlur() {
-		autoSaveNameField("user_name", userName);
+	function onUserNameBlur(e) {
+		autoSaveNameField("user_name", e.target.value);
 	}
 
 	function onResetSoul() {
@@ -565,6 +559,7 @@ function IdentitySection() {
 						<option value="auto">Browser default</option>
 						<option value="en">English</option>
 						<option value="fr">French</option>
+						<option value="zh">简体中文</option>
 					</select>
 					<button
 						type="button"
@@ -608,6 +603,7 @@ function IdentitySection() {
 				${error ? html`<span class="text-xs" style="color:var(--error);">${error}</span>` : null}
 			</div>
 		</form>
+		${gon.get("version") ? html`<p class="text-xs text-[var(--muted)]" style="margin-top:auto;padding-top:16px;">v${gon.get("version")}</p>` : null}
 	</div>`;
 }
 
@@ -864,6 +860,7 @@ function SecuritySection() {
 	var [editingPk, setEditingPk] = useState(null);
 	var [editingPkName, setEditingPkName] = useState("");
 	var [passkeyOrigins, setPasskeyOrigins] = useState([]);
+	var [passkeyHostUpdateHosts, setPasskeyHostUpdateHosts] = useState([]);
 
 	var [apiKeys, setApiKeys] = useState([]);
 	var [akLabel, setAkLabel] = useState("");
@@ -892,6 +889,16 @@ function SecuritySection() {
 	// A credential added while localhost-bypass is active can immediately make the
 	// current session unauthenticated (no session cookie). Reload so middleware
 	// can route to /login in that transition.
+	function refreshPasskeyHostStatus() {
+		return fetch("/api/auth/status")
+			.then((r) => (r.ok ? r.json() : null))
+			.then((status) => {
+				if (Array.isArray(status?.passkey_host_update_hosts))
+					setPasskeyHostUpdateHosts(status.passkey_host_update_hosts);
+				if (Array.isArray(status?.passkey_origins)) setPasskeyOrigins(status.passkey_origins);
+			});
+	}
+
 	function reloadIfAuthNowRequiresLogin({ reload = true } = {}) {
 		return fetch("/api/auth/status")
 			.then((r) => (r.ok ? r.json() : null))
@@ -910,12 +917,13 @@ function SecuritySection() {
 		fetch("/api/auth/status")
 			.then((r) => (r.ok ? r.json() : null))
 			.then((d) => {
-				if (d?.auth_disabled) setAuthDisabled(true);
-				if (d?.localhost_only) setLocalhostOnly(true);
-				if (d?.has_password === false) setHasPassword(false);
-				if (d?.has_passkeys === true) setHasPasskeys(true);
-				if (d?.setup_complete) setSetupComplete(true);
-				if (d?.passkey_origins) setPasskeyOrigins(d.passkey_origins);
+				if (typeof d?.auth_disabled === "boolean") setAuthDisabled(d.auth_disabled);
+				if (typeof d?.localhost_only === "boolean") setLocalhostOnly(d.localhost_only);
+				if (typeof d?.has_password === "boolean") setHasPassword(d.has_password);
+				if (typeof d?.has_passkeys === "boolean") setHasPasskeys(d.has_passkeys);
+				if (typeof d?.setup_complete === "boolean") setSetupComplete(d.setup_complete);
+				if (Array.isArray(d?.passkey_origins)) setPasskeyOrigins(d.passkey_origins);
+				if (Array.isArray(d?.passkey_host_update_hosts)) setPasskeyHostUpdateHosts(d.passkey_host_update_hosts);
 				setAuthLoading(false);
 				rerender();
 			})
@@ -1068,9 +1076,11 @@ function SecuritySection() {
 								setHasPasskeys((d.passkeys || []).length > 0);
 								setSetupComplete(true);
 								setAuthDisabled(false);
-								setPkMsg("Passkey added.");
-								notifyAuthStatusChanged();
-								rerender();
+								return refreshPasskeyHostStatus().then(() => {
+									setPkMsg("Passkey added.");
+									notifyAuthStatusChanged();
+									rerender();
+								});
 							});
 					});
 				} else
@@ -1124,8 +1134,10 @@ function SecuritySection() {
 			.then((d) => {
 				setPasskeys(d.passkeys || []);
 				setHasPasskeys((d.passkeys || []).length > 0);
-				notifyAuthStatusChanged();
-				rerender();
+				return refreshPasskeyHostStatus().then(() => {
+					notifyAuthStatusChanged();
+					rerender();
+				});
 			});
 	}
 
@@ -1332,6 +1344,14 @@ function SecuritySection() {
 		<div style="max-width:600px;border-top:1px solid var(--border);padding-top:16px;">
 			<h3 class="text-sm font-medium text-[var(--text-strong)]" style="margin-bottom:8px;">Passkeys</h3>
 			${passkeyOrigins.length > 1 && html`<div class="text-xs text-[var(--muted)]" style="margin-bottom:8px;">Passkeys will work when visiting: ${passkeyOrigins.map((o) => o.replace(/^https?:\/\//, "")).join(", ")}</div>`}
+			${
+				hasPasskeys && passkeyHostUpdateHosts.length > 0
+					? html`<div class="alert-warning-text max-w-form" style="margin-bottom:8px;">
+						<span class="alert-label-warning">Passkey update needed: </span>
+						New host detected (${passkeyHostUpdateHosts.join(", ")}). Sign in with your password on that host, then register a new passkey there.
+					</div>`
+					: null
+			}
 			${
 				pkLoading
 					? html`<div class="text-xs text-[var(--muted)]">Loading\u2026</div>`
@@ -1731,6 +1751,16 @@ function OpenClawImportSection() {
 		</div>`;
 	}
 
+	var telegramAccounts = Number(scan.telegram_accounts) || 0;
+	var discordAccounts = Number(scan.discord_accounts) || 0;
+	var channelParts = [];
+	if (telegramAccounts > 0) channelParts.push(`${telegramAccounts} Telegram account(s)`);
+	if (discordAccounts > 0) channelParts.push(`${discordAccounts} Discord account(s)`);
+	var channelDetail = channelParts.length > 0 ? channelParts.join(", ") : null;
+	var unsupportedChannels = (scan.unsupported_channels || []).filter(
+		(channel) => String(channel).toLowerCase() !== "discord",
+	);
+
 	var categories = [
 		{ key: "identity", label: "Identity", available: scan.identity_available },
 		{ key: "providers", label: "Providers", available: scan.providers_available },
@@ -1745,7 +1775,7 @@ function OpenClawImportSection() {
 			key: "channels",
 			label: "Channels",
 			available: scan.channels_available,
-			detail: `${scan.telegram_accounts} Telegram account(s)`,
+			detail: channelDetail,
 		},
 		{
 			key: "sessions",
@@ -1760,6 +1790,8 @@ function OpenClawImportSection() {
 		<h2 class="text-lg font-medium text-[var(--text-strong)]">OpenClaw Import</h2>
 		<p class="text-xs text-[var(--muted)] leading-relaxed" style="max-width:600px;margin:0;">
 			Import data from your OpenClaw installation at <code class="text-[var(--text)]">${scan.home_dir}</code>.
+			This is a read-only copy \u2014 your OpenClaw files will not be modified or removed.
+			You can keep using both side by side and re-import whenever you like.
 		</p>
 		${
 			error
@@ -1810,9 +1842,9 @@ function OpenClawImportSection() {
 					)}
 				</div>
 				${
-					scan.unsupported_channels?.length > 0
+					unsupportedChannels.length > 0
 						? html`<p class="text-xs text-[var(--muted)]" style="max-width:600px;">
-							Unsupported channels (coming soon): ${scan.unsupported_channels.join(", ")}
+							Unsupported channels (coming soon): ${unsupportedChannels.join(", ")}
 						</p>`
 						: null
 				}
@@ -1832,7 +1864,7 @@ function OpenClawImportSection() {
 
 function GraphqlSection() {
 	var [loadingConfig, setLoadingConfig] = useState(true);
-	var [enabled, setEnabled] = useState(true);
+	var [enabled, setEnabled] = useState(false);
 	var [saving, setSaving] = useState(false);
 	var [msg, setMsg] = useState(null);
 	var [err, setErr] = useState(null);
@@ -1842,6 +1874,10 @@ function GraphqlSection() {
 	var wsEndpoint = `${wsProtocol}//${window.location.host}/graphql`;
 
 	function loadGraphqlConfig() {
+		if (!connected.value) {
+			setLoadingConfig(true);
+			return;
+		}
 		setLoadingConfig(true);
 		sendRpc("graphql.config.get", {})
 			.then((res) => {
@@ -1862,14 +1898,24 @@ function GraphqlSection() {
 	}
 
 	useEffect(() => {
-		loadGraphqlConfig();
-	}, []);
+		if (connected.value) {
+			loadGraphqlConfig();
+		} else {
+			setLoadingConfig(true);
+			setSaving(false);
+			setMsg(null);
+		}
+	}, [connected.value]);
 
 	function onToggle(nextEnabled) {
+		if (!connected.value) {
+			setErr("WebSocket not connected");
+			rerender();
+			return;
+		}
 		setSaving(true);
 		setMsg(null);
 		setErr(null);
-		setEnabled(nextEnabled);
 		rerender();
 
 		sendRpc("graphql.config.set", { enabled: nextEnabled })
@@ -1881,17 +1927,21 @@ function GraphqlSection() {
 						setMsg("GraphQL updated for this runtime, but failed to persist to config. It may revert on restart.");
 					}
 				} else {
-					setEnabled(!nextEnabled);
 					setErr(res?.error?.message || "Failed to update GraphQL setting");
 				}
 				rerender();
 			})
 			.catch((error) => {
 				setSaving(false);
-				setEnabled(!nextEnabled);
 				setErr(error?.message || "Failed to update GraphQL setting");
 				rerender();
 			});
+	}
+
+	if (!connected.value) {
+		return html`<div class="flex-1 flex flex-col min-w-0 p-4 gap-4 overflow-y-auto">
+			<div class="text-xs text-[var(--muted)]">Connecting…</div>
+		</div>`;
 	}
 
 	if (loadingConfig) {
@@ -1925,7 +1975,7 @@ function GraphqlSection() {
 						id="graphqlEnabledToggle"
 						type="checkbox"
 						checked=${enabled}
-						disabled=${saving}
+						disabled=${saving || loadingConfig || !connected.value}
 						onChange=${(e) => onToggle(e.target.checked)}
 					/>
 					<span class="toggle-slider"></span>
@@ -2315,6 +2365,7 @@ function TailscaleSection() {
 	var ref = useRef(null);
 	var [tsStatus, setTsStatus] = useState(null);
 	var [tsError, setTsError] = useState(null);
+	var [tsWarning, setTsWarning] = useState(null);
 	var [tsLoading, setTsLoading] = useState(true);
 	var [configuring, setConfiguring] = useState(false);
 	var [configuringMode, setConfiguringMode] = useState(null);
@@ -2341,6 +2392,7 @@ function TailscaleSection() {
 				} else {
 					setTsStatus(data);
 					setTsError(null);
+					setTsWarning(data.passkey_warning || null);
 				}
 				setTsLoading(false);
 				rerender();
@@ -2355,6 +2407,7 @@ function TailscaleSection() {
 	function setMode(mode) {
 		setConfiguring(true);
 		setTsError(null);
+		setTsWarning(null);
 		setConfiguringMode(mode);
 		rerender();
 		fetch("/api/tailscale/configure", {
@@ -2367,6 +2420,7 @@ function TailscaleSection() {
 				if (data.error) {
 					setTsError(data.error);
 				} else {
+					setTsWarning(data.passkey_warning || null);
 					fetchTsStatus();
 				}
 				setConfiguring(false);
@@ -2516,6 +2570,13 @@ function TailscaleSection() {
 		}
 	}
 
+	function renderTsWarning(container) {
+		var warningEl = document.createElement("div");
+		warningEl.className = "alert-warning-text max-w-form";
+		warningEl.textContent = tsWarning;
+		container.appendChild(warningEl);
+	}
+
 	function renderNotInstalled(container) {
 		var notInst = cloneHidden("ts-not-installed");
 		if (notInst) {
@@ -2539,6 +2600,7 @@ function TailscaleSection() {
 		}
 		if (tsStatus?.installed) renderInstalledBar(container, tsStatus);
 		if (tsError) renderTsError(container);
+		if (tsWarning) renderTsWarning(container);
 		if (tsStatus?.installed === false) {
 			if (!tsError) renderNotInstalled(container);
 			return;
@@ -2639,6 +2701,19 @@ function VoiceSection() {
 		if (activeRecorder) {
 			activeRecorder.stop();
 		}
+	}
+
+	function humanizeMicError(err) {
+		if (err.name === "OverconstrainedError" || (err.message && /constraint/i.test(err.message))) {
+			return "No compatible microphone found. Check your audio input device.";
+		}
+		if (err.name === "NotFoundError" || err.name === "NotAllowedError") {
+			return "Microphone access denied or no microphone found. Check browser permissions.";
+		}
+		if (err.name === "NotReadableError") {
+			return "Microphone is in use by another application.";
+		}
+		return err.message || "STT test failed";
 	}
 
 	// Test a voice provider (TTS or STT)
@@ -2769,13 +2844,7 @@ function VoiceSection() {
 					rerender();
 				};
 			} catch (err) {
-				if (err.name === "NotAllowedError") {
-					setVoiceErr("Microphone permission denied");
-				} else if (err.name === "NotFoundError") {
-					setVoiceErr("No microphone found");
-				} else {
-					setVoiceErr(err.message || "STT test failed");
-				}
+				setVoiceErr(humanizeMicError(err));
 				setVoiceTesting(null);
 			}
 		}
@@ -3876,6 +3945,7 @@ var pageSectionHandlers = {
 	providers: { init: initProviders, teardown: teardownProviders },
 	channels: { init: initChannels, teardown: teardownChannels },
 	mcp: { init: initMcp, teardown: teardownMcp },
+	nodes: { init: initNodes, teardown: teardownNodes },
 	hooks: { init: initHooks, teardown: teardownHooks },
 	skills: { init: initSkills, teardown: teardownSkills },
 	agents: { init: initAgents, teardown: teardownAgents },
@@ -3886,6 +3956,7 @@ var pageSectionHandlers = {
 		teardown: teardownMonitoring,
 	},
 	logs: { init: initLogs, teardown: teardownLogs },
+	"network-audit": { init: initNetworkAudit, teardown: teardownNetworkAudit },
 };
 
 /** Wrapper that mounts a page init/teardown pair into a ref div. */

@@ -99,6 +99,8 @@ pub struct SessionEntry {
     #[serde(default)]
     pub message_count: Option<u64>,
     #[serde(default)]
+    pub last_seen_message_count: Option<u64>,
+    #[serde(default)]
     pub project_id: Option<String>,
     #[serde(default)]
     pub archived: Option<bool>,
@@ -114,6 +116,8 @@ pub struct SessionEntry {
     pub parent_session_key: Option<String>,
     #[serde(default)]
     pub fork_point: Option<u64>,
+    #[serde(default)]
+    pub preview: Option<String>,
     #[serde(default)]
     pub mcp_disabled: Option<bool>,
     #[serde(default)]
@@ -278,6 +282,12 @@ pub struct HeartbeatConfig {
     #[serde(default)]
     pub active_hours: Option<HeartbeatActiveHours>,
     #[serde(default)]
+    pub deliver: Option<bool>,
+    #[serde(default)]
+    pub channel: Option<String>,
+    #[serde(default)]
+    pub to: Option<String>,
+    #[serde(default)]
     pub sandbox_enabled: Option<bool>,
     #[serde(default)]
     pub sandbox_image: Option<String>,
@@ -414,7 +424,7 @@ pub struct ProviderInfo {
 pub struct ModelInfo {
     #[serde(default)]
     pub id: Option<String>,
-    #[serde(default)]
+    #[serde(default, alias = "displayName")]
     pub name: Option<String>,
     #[serde(default)]
     pub provider: Option<String>,
@@ -1005,6 +1015,9 @@ pub struct TickEvent {
 pub struct MemoryStats {
     /// Process RSS in bytes.
     pub process: u64,
+    /// Approximate bytes held by loaded local llama.cpp model tensors.
+    #[serde(default)]
+    pub local_llama_cpp: u64,
     /// System available memory in bytes.
     pub available: u64,
     /// System total memory in bytes.

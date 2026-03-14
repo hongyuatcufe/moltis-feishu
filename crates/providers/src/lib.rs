@@ -1,9 +1,8 @@
 //! LLM provider implementations and registry.
 
-// FFI wrappers for llama-cpp-2 require unsafe Send/Sync impls when local-llm feature is enabled.
-#![cfg_attr(feature = "local-llm", allow(unsafe_code))]
-
 pub mod anthropic;
+#[cfg(test)]
+pub mod contract;
 pub mod error;
 pub mod openai;
 pub mod openai_compat;
@@ -92,12 +91,52 @@ pub fn namespaced_model_id(provider: &str, model_id: &str) -> String {
     format!("{provider}{MODEL_ID_NAMESPACE_SEP}{model_id}")
 }
 
+/// Separator between a model ID and its reasoning effort suffix.
+const REASONING_SUFFIX_SEP: char = '@';
+
+/// Reasoning effort suffixes appended to model IDs.
+const REASONING_SUFFIXES: &[(&str, moltis_agents::model::ReasoningEffort)] = &[
+    ("reasoning-low", moltis_agents::model::ReasoningEffort::Low),
+    (
+        "reasoning-medium",
+        moltis_agents::model::ReasoningEffort::Medium,
+    ),
+    (
+        "reasoning-high",
+        moltis_agents::model::ReasoningEffort::High,
+    ),
+];
+
+/// Split a model ID into (base_id, optional reasoning effort).
+///
+/// Examples:
+/// - `"anthropic::claude-opus-4-5@reasoning-high"` → `("anthropic::claude-opus-4-5", Some(High))`
+/// - `"gpt-4o"` → `("gpt-4o", None)`
+#[must_use]
+pub fn split_reasoning_suffix(
+    model_id: &str,
+) -> (&str, Option<moltis_agents::model::ReasoningEffort>) {
+    if let Some((base, suffix)) = model_id.rsplit_once(REASONING_SUFFIX_SEP) {
+        for &(tag, effort) in REASONING_SUFFIXES {
+            if suffix == tag {
+                return (base, Some(effort));
+            }
+        }
+    }
+    (model_id, None)
+}
+
 #[must_use]
 pub fn raw_model_id(model_id: &str) -> &str {
-    model_id
-        .rsplit_once(MODEL_ID_NAMESPACE_SEP)
+    // Fast path: skip reasoning suffix parsing when no `@` is present.
+    let base = if model_id.contains(REASONING_SUFFIX_SEP) {
+        split_reasoning_suffix(model_id).0
+    } else {
+        model_id
+    };
+    base.rsplit_once(MODEL_ID_NAMESPACE_SEP)
         .map(|(_, raw)| raw)
-        .unwrap_or(model_id)
+        .unwrap_or(base)
 }
 
 #[must_use]
@@ -134,6 +173,10 @@ fn subscription_preference_rank(provider_name: &str) -> usize {
     }
 }
 
+#[cfg_attr(
+    not(any(feature = "provider-openai-codex", feature = "provider-github-copilot")),
+    allow(dead_code)
+)]
 fn oauth_discovery_enabled(config: &ProvidersConfig, provider_name: &str) -> bool {
     config.get(provider_name).is_none_or(|entry| entry.enabled)
 }
@@ -283,7 +326,11 @@ async fn discover_ollama_models_from_api(base_url: String) -> anyhow::Result<Vec
     Ok(models)
 }
 
-fn discover_ollama_models(base_url: &str) -> anyhow::Result<Vec<DiscoveredModel>> {
+/// Spawn Ollama model discovery in a background thread and return the receiver
+/// immediately, without blocking. Call `.recv()` later to collect the result.
+fn start_ollama_discovery(
+    base_url: &str,
+) -> std::sync::mpsc::Receiver<anyhow::Result<Vec<DiscoveredModel>>> {
     let (tx, rx) = std::sync::mpsc::sync_channel(1);
     let base_url = base_url.to_string();
     std::thread::spawn(move || {
@@ -294,9 +341,188 @@ fn discover_ollama_models(base_url: &str) -> anyhow::Result<Vec<DiscoveredModel>
             .and_then(|rt| rt.block_on(discover_ollama_models_from_api(base_url)));
         let _ = tx.send(result);
     });
+    rx
+}
 
-    rx.recv()
-        .map_err(|err| anyhow::anyhow!("ollama model discovery worker failed: {err}"))?
+// ── Ollama model info probing ────────────────────────────────────────────────
+
+#[derive(Debug, Default, serde::Deserialize)]
+struct OllamaShowResponse {
+    #[serde(default)]
+    details: OllamaModelDetails,
+    /// Ollama >= 0.5.x returns a list of model capabilities (e.g. `["tools"]`).
+    #[serde(default)]
+    capabilities: Vec<String>,
+}
+
+#[derive(Debug, Clone, Default, serde::Deserialize)]
+struct OllamaModelDetails {
+    family: Option<String>,
+    #[serde(default)]
+    families: Option<Vec<String>>,
+}
+
+/// Model families known to support native OpenAI-style tool calling in Ollama.
+const OLLAMA_NATIVE_TOOL_FAMILIES: &[&str] = &[
+    "llama3.1",
+    "llama3.2",
+    "llama3.3",
+    "llama4",
+    "qwen2.5",
+    "qwen3",
+    "mistral",
+    "mixtral",
+    "command-r",
+    "firefunction",
+    "hermes",
+];
+
+/// Determine whether an Ollama model supports native tool calling based on its
+/// model name and family metadata from `/api/show`.
+fn ollama_model_supports_native_tools(model_name: &str, details: &OllamaModelDetails) -> bool {
+    let name_lower = model_name.to_ascii_lowercase();
+
+    // Check all family strings from the model details.
+    let families_iter = details
+        .family
+        .iter()
+        .chain(details.families.iter().flatten());
+    for family in families_iter {
+        let fam_lower = family.to_ascii_lowercase();
+        if OLLAMA_NATIVE_TOOL_FAMILIES
+            .iter()
+            .any(|known| fam_lower.contains(known))
+        {
+            return true;
+        }
+    }
+
+    // Heuristic: check model name for known families.
+    OLLAMA_NATIVE_TOOL_FAMILIES
+        .iter()
+        .any(|known| name_lower.contains(known))
+}
+
+/// Check if Ollama's `capabilities` list indicates native tool support.
+///
+/// Returns `Some(true)` if `"tools"` is present, `Some(false)` if capabilities
+/// exist but don't include tools, and `None` if the list is empty (pre-0.5.x
+/// Ollama versions that don't report capabilities).
+fn ollama_capabilities_support_tools(capabilities: &[String]) -> Option<bool> {
+    if capabilities.is_empty() {
+        return None;
+    }
+    Some(capabilities.iter().any(|c| c == "tools"))
+}
+
+/// Probe the Ollama `/api/show` endpoint for a specific model to get its family
+/// and details. Returns `Ok(response)` on success, error on timeout/failure.
+async fn probe_ollama_model_info(
+    base_url: &str,
+    model_name: &str,
+) -> anyhow::Result<OllamaShowResponse> {
+    let api_base = normalize_ollama_api_base_url(base_url);
+    let endpoint = format!("{}/api/show", api_base.trim_end_matches('/'));
+    let response = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(3))
+        .build()?
+        .post(&endpoint)
+        .json(&serde_json::json!({ "name": model_name }))
+        .send()
+        .await?;
+
+    let status = response.status();
+    if !status.is_success() {
+        anyhow::bail!("ollama /api/show for {model_name} failed HTTP {status}");
+    }
+    Ok(response.json().await?)
+}
+
+/// Resolve the effective tool mode for an Ollama model.
+///
+/// - If the user configured an explicit `tool_mode`, use that.
+/// - Otherwise, check the model's `capabilities` list from Ollama (>= 0.5.x).
+/// - Fall back to the hardcoded family whitelist only when capabilities are
+///   unavailable (pre-0.5.x Ollama).
+fn resolve_ollama_tool_mode(
+    config_tool_mode: moltis_config::ToolMode,
+    model_name: &str,
+    probe_result: Option<&OllamaShowResponse>,
+) -> moltis_config::ToolMode {
+    use moltis_config::ToolMode;
+
+    match config_tool_mode {
+        ToolMode::Native | ToolMode::Text | ToolMode::Off => config_tool_mode,
+        ToolMode::Auto => {
+            // Prefer Ollama's own capabilities field when available.
+            if let Some(resp) = probe_result
+                && let Some(supports) = ollama_capabilities_support_tools(&resp.capabilities)
+            {
+                return if supports {
+                    ToolMode::Native
+                } else {
+                    ToolMode::Text
+                };
+            }
+            // Fallback: family whitelist (pre-0.5.x Ollama without capabilities).
+            let details = probe_result
+                .map(|r| &r.details)
+                .cloned()
+                .unwrap_or_default();
+            if ollama_model_supports_native_tools(model_name, &details) {
+                ToolMode::Native
+            } else {
+                ToolMode::Text
+            }
+        },
+    }
+}
+
+/// Batch-probe Ollama `/api/show` for a list of models.
+/// Runs probes in a dedicated thread with its own tokio runtime (same pattern
+/// as `discover_ollama_models`). Returns a map from model ID to show response;
+/// failures are silently dropped.
+fn probe_ollama_models_batch(
+    base_url: &str,
+    models: &[DiscoveredModel],
+) -> HashMap<String, OllamaShowResponse> {
+    if models.is_empty() {
+        return HashMap::new();
+    }
+    let base_url = base_url.to_string();
+    let model_ids: Vec<String> = models.iter().map(|m| m.id.clone()).collect();
+    let (tx, rx) = std::sync::mpsc::sync_channel(1);
+
+    std::thread::spawn(move || {
+        let result = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .map(|rt| {
+                rt.block_on(async {
+                    let futs: Vec<_> = model_ids
+                        .iter()
+                        .map(|id| {
+                            let base = base_url.clone();
+                            let model_id = id.clone();
+                            async move {
+                                let resp = probe_ollama_model_info(&base, &model_id).await;
+                                (model_id, resp)
+                            }
+                        })
+                        .collect();
+                    futures::future::join_all(futs).await
+                })
+            });
+        let _ = tx.send(result);
+    });
+
+    match rx.recv() {
+        Ok(Ok(results)) => results
+            .into_iter()
+            .filter_map(|(id, r)| r.ok().map(|resp| (id, resp)))
+            .collect(),
+        _ => HashMap::new(),
+    }
 }
 
 struct RegistryModelProvider {
@@ -326,6 +552,10 @@ impl LlmProvider for RegistryModelProvider {
         self.inner.supports_tools()
     }
 
+    fn tool_mode(&self) -> Option<moltis_config::ToolMode> {
+        self.inner.tool_mode()
+    }
+
     fn context_window(&self) -> u32 {
         self.inner.context_window()
     }
@@ -348,20 +578,27 @@ impl LlmProvider for RegistryModelProvider {
     ) -> Pin<Box<dyn Stream<Item = StreamEvent> + Send + '_>> {
         self.inner.stream_with_tools(messages, tools)
     }
+
+    fn reasoning_effort(&self) -> Option<moltis_agents::model::ReasoningEffort> {
+        self.inner.reasoning_effort()
+    }
+
+    fn with_reasoning_effort(
+        self: Arc<Self>,
+        effort: moltis_agents::model::ReasoningEffort,
+    ) -> Option<Arc<dyn LlmProvider>> {
+        let new_inner = Arc::clone(&self.inner).with_reasoning_effort(effort)?;
+        Some(Arc::new(RegistryModelProvider {
+            model_id: self.model_id.clone(),
+            inner: new_inner,
+        }))
+    }
 }
 
 /// Resolve an API key from config (Secret) or environment variable,
 /// keeping the value wrapped in `Secret<String>` to avoid leaking it.
 fn env_value(env_overrides: &HashMap<String, String>, key: &str) -> Option<String> {
-    std::env::var(key)
-        .ok()
-        .filter(|value| !value.trim().is_empty())
-        .or_else(|| {
-            env_overrides
-                .get(key)
-                .cloned()
-                .filter(|value| !value.trim().is_empty())
-        })
+    moltis_config::env_value_with_overrides(env_overrides, key)
 }
 
 /// Resolve an API key from config (Secret) or environment variable,
@@ -376,6 +613,7 @@ fn resolve_api_key(
         .get(provider)
         .and_then(|e| e.api_key.clone())
         .or_else(|| env_value(env_overrides, env_key).map(secrecy::Secret::new))
+        .or_else(|| moltis_config::generic_provider_api_key_from_env(provider, env_overrides))
         .filter(|s| !s.expose_secret().is_empty())
 }
 
@@ -447,6 +685,10 @@ pub fn is_chat_capable_model(model_id: &str) -> bool {
         "omni-moderation",
         "moderation-",
         "sora",
+        // Google Gemini non-chat models
+        "imagen-",
+        "gemini-embedding",
+        "learnlm-",
         // Z.AI non-chat models
         "glm-image",
         "glm-asr",
@@ -539,6 +781,41 @@ pub fn supports_vision_for_model(model_id: &str) -> bool {
     false
 }
 
+/// Check if a model supports reasoning/extended thinking.
+///
+/// Reasoning-capable models can use the `reasoning_effort` configuration
+/// to control the depth of extended thinking. This is used by the UI and
+/// validation to inform users when reasoning_effort is set on a model
+/// that doesn't support it.
+pub fn supports_reasoning_for_model(model_id: &str) -> bool {
+    let id = capability_model_id(model_id);
+    // Anthropic Claude Opus 4.5+ and Sonnet 4.5+
+    if id.starts_with("claude-opus-4-5")
+        || id.starts_with("claude-sonnet-4-5")
+        || id.starts_with("claude-opus-4-6")
+        || id.starts_with("claude-sonnet-4-6")
+    {
+        return true;
+    }
+    // Claude 3.7 Sonnet supports extended thinking
+    if id.starts_with("claude-3-7-sonnet") {
+        return true;
+    }
+    // OpenAI o-series reasoning models
+    if id.starts_with("o1") || id.starts_with("o3") || id.starts_with("o4") {
+        return true;
+    }
+    // Gemini 2.5 Flash/Pro with thinking
+    if id.starts_with("gemini-2.5") {
+        return true;
+    }
+    // DeepSeek R1 / reasoning models
+    if id.contains("deepseek-r1") || id.contains("deepseek-reasoner") {
+        return true;
+    }
+    false
+}
+
 /// Info about an available model.
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct ModelInfo {
@@ -609,6 +886,15 @@ const DEEPSEEK_MODELS: &[(&str, &str)] = &[
 /// Known Moonshot models.
 const MOONSHOT_MODELS: &[(&str, &str)] = &[("kimi-k2.5", "Kimi K2.5")];
 
+/// Known Google Gemini models.
+/// See: <https://ai.google.dev/gemini-api/docs/models>
+const GEMINI_MODELS: &[(&str, &str)] = &[
+    ("gemini-2.5-flash-preview-05-20", "Gemini 2.5 Flash Preview"),
+    ("gemini-2.5-pro-preview-05-06", "Gemini 2.5 Pro Preview"),
+    ("gemini-2.0-flash", "Gemini 2.0 Flash"),
+    ("gemini-2.0-flash-lite", "Gemini 2.0 Flash Lite"),
+];
+
 /// OpenAI-compatible provider definition for table-driven registration.
 struct OpenAiCompatDef {
     config_name: &'static str,
@@ -621,6 +907,15 @@ struct OpenAiCompatDef {
     /// this to `false` so the static catalog is used without a noisy warning.
     /// Users can still override via `fetch_models = true` in config.
     supports_model_discovery: bool,
+    /// When `false`, a dummy API key (the provider name) is used if none is
+    /// configured. Intended for local servers that don't authenticate.
+    requires_api_key: bool,
+    /// Local-only providers (Ollama, LM Studio) are skipped unless the user
+    /// has an explicit `[providers.<name>]` entry, a `_BASE_URL` env var, or
+    /// configured models. This avoids probing localhost when nothing is running.
+    /// Also ensures model discovery is always attempted (never short-circuited
+    /// by the empty-catalog heuristic).
+    local_only: bool,
 }
 
 const OPENAI_COMPAT_PROVIDERS: &[OpenAiCompatDef] = &[
@@ -631,6 +926,8 @@ const OPENAI_COMPAT_PROVIDERS: &[OpenAiCompatDef] = &[
         default_base_url: "https://api.mistral.ai/v1",
         models: MISTRAL_MODELS,
         supports_model_discovery: true,
+        requires_api_key: true,
+        local_only: false,
     },
     OpenAiCompatDef {
         config_name: "openrouter",
@@ -639,6 +936,8 @@ const OPENAI_COMPAT_PROVIDERS: &[OpenAiCompatDef] = &[
         default_base_url: "https://openrouter.ai/api/v1",
         models: &[],
         supports_model_discovery: true,
+        requires_api_key: true,
+        local_only: false,
     },
     OpenAiCompatDef {
         config_name: "cerebras",
@@ -647,6 +946,8 @@ const OPENAI_COMPAT_PROVIDERS: &[OpenAiCompatDef] = &[
         default_base_url: "https://api.cerebras.ai/v1",
         models: CEREBRAS_MODELS,
         supports_model_discovery: true,
+        requires_api_key: true,
+        local_only: false,
     },
     OpenAiCompatDef {
         config_name: "minimax",
@@ -656,6 +957,8 @@ const OPENAI_COMPAT_PROVIDERS: &[OpenAiCompatDef] = &[
         models: MINIMAX_MODELS,
         // MiniMax API does not expose a /models endpoint (returns 404).
         supports_model_discovery: false,
+        requires_api_key: true,
+        local_only: false,
     },
     OpenAiCompatDef {
         config_name: "moonshot",
@@ -664,6 +967,8 @@ const OPENAI_COMPAT_PROVIDERS: &[OpenAiCompatDef] = &[
         default_base_url: "https://api.moonshot.ai/v1",
         models: MOONSHOT_MODELS,
         supports_model_discovery: true,
+        requires_api_key: true,
+        local_only: false,
     },
     OpenAiCompatDef {
         config_name: "zai",
@@ -672,6 +977,8 @@ const OPENAI_COMPAT_PROVIDERS: &[OpenAiCompatDef] = &[
         default_base_url: "https://api.z.ai/api/paas/v4",
         models: ZAI_MODELS,
         supports_model_discovery: true,
+        requires_api_key: true,
+        local_only: false,
     },
     OpenAiCompatDef {
         config_name: "venice",
@@ -680,6 +987,8 @@ const OPENAI_COMPAT_PROVIDERS: &[OpenAiCompatDef] = &[
         default_base_url: "https://api.venice.ai/api/v1",
         models: &[],
         supports_model_discovery: true,
+        requires_api_key: true,
+        local_only: false,
     },
     OpenAiCompatDef {
         config_name: "deepseek",
@@ -688,6 +997,8 @@ const OPENAI_COMPAT_PROVIDERS: &[OpenAiCompatDef] = &[
         default_base_url: "https://api.deepseek.com",
         models: DEEPSEEK_MODELS,
         supports_model_discovery: true,
+        requires_api_key: true,
+        local_only: false,
     },
     OpenAiCompatDef {
         config_name: "ollama",
@@ -696,6 +1007,28 @@ const OPENAI_COMPAT_PROVIDERS: &[OpenAiCompatDef] = &[
         default_base_url: "http://127.0.0.1:11434/v1",
         models: &[],
         supports_model_discovery: true,
+        requires_api_key: false,
+        local_only: true,
+    },
+    OpenAiCompatDef {
+        config_name: "lmstudio",
+        env_key: "LMSTUDIO_API_KEY",
+        env_base_url_key: "LMSTUDIO_BASE_URL",
+        default_base_url: "http://127.0.0.1:1234/v1",
+        models: &[],
+        supports_model_discovery: true,
+        requires_api_key: false,
+        local_only: true,
+    },
+    OpenAiCompatDef {
+        config_name: "gemini",
+        env_key: "GEMINI_API_KEY",
+        env_base_url_key: "GEMINI_BASE_URL",
+        default_base_url: "https://generativelanguage.googleapis.com/v1beta/openai",
+        models: GEMINI_MODELS,
+        supports_model_discovery: true,
+        requires_api_key: true,
+        local_only: false,
     },
 ];
 
@@ -705,7 +1038,6 @@ trait DynamicModelDiscovery {
     fn is_enabled_and_authenticated(&self, config: &ProvidersConfig) -> bool;
     fn configured_models(&self, config: &ProvidersConfig) -> Vec<String>;
     fn should_fetch_models(&self, config: &ProvidersConfig) -> bool;
-    fn available_models(&self) -> Vec<DiscoveredModel>;
     fn live_models(&self) -> anyhow::Result<Vec<DiscoveredModel>>;
     fn build_provider(&self, model_id: String, config: &ProvidersConfig) -> Arc<dyn LlmProvider>;
     fn display_name(&self, model_id: &str, discovered: &str) -> String;
@@ -730,10 +1062,6 @@ impl DynamicModelDiscovery for OpenAiCodexDiscovery {
 
     fn should_fetch_models(&self, config: &ProvidersConfig) -> bool {
         should_fetch_models(config, self.provider_name())
-    }
-
-    fn available_models(&self) -> Vec<DiscoveredModel> {
-        openai_codex::available_models()
     }
 
     fn live_models(&self) -> anyhow::Result<Vec<DiscoveredModel>> {
@@ -777,10 +1105,6 @@ impl DynamicModelDiscovery for GitHubCopilotDiscovery {
         should_fetch_models(config, self.provider_name())
     }
 
-    fn available_models(&self) -> Vec<DiscoveredModel> {
-        github_copilot::available_models()
-    }
-
     fn live_models(&self) -> anyhow::Result<Vec<DiscoveredModel>> {
         github_copilot::live_models()
     }
@@ -803,6 +1127,12 @@ pub struct ProviderRegistry {
     providers: HashMap<String, Arc<dyn LlmProvider>>,
     models: Vec<ModelInfo>,
 }
+
+/// Pending model discovery handles returned by [`ProviderRegistry::fire_discoveries`].
+pub type PendingDiscoveries = Vec<(
+    String,
+    std::sync::mpsc::Receiver<anyhow::Result<Vec<DiscoveredModel>>>,
+)>;
 
 impl ProviderRegistry {
     #[must_use]
@@ -1013,16 +1343,47 @@ impl ProviderRegistry {
 
     /// Auto-discover providers from config, process env, and optional env
     /// overrides. Process env always wins when both are present.
+    ///
+    /// Model discovery HTTP requests are fired concurrently in Phase 1,
+    /// collected in Phase 2, and the results are used to register providers
+    /// in Phase 3. This reduces startup time from `sum(latencies)` to
+    /// `max(latencies)`.
     pub fn from_env_with_config_and_overrides(
         config: &ProvidersConfig,
         env_overrides: &HashMap<String, String>,
     ) -> Self {
+        let pending = Self::fire_discoveries(config, env_overrides);
+        let prefetched = Self::collect_discoveries(pending);
+        Self::from_config_with_prefetched(config, env_overrides, &prefetched)
+    }
+
+    /// Register providers without making any discovery HTTP requests.
+    ///
+    /// This uses static model catalogs plus any explicit/pinned models from
+    /// config and env overrides.
+    pub fn from_config_with_static_catalogs(
+        config: &ProvidersConfig,
+        env_overrides: &HashMap<String, String>,
+    ) -> Self {
+        let prefetched = HashMap::new();
+        Self::from_config_with_prefetched(config, env_overrides, &prefetched)
+    }
+
+    /// Register providers using already-collected discovery results.
+    ///
+    /// `prefetched` should come from [`collect_discoveries`], but callers may
+    /// also pass an empty map to register only static catalogs.
+    pub fn from_config_with_prefetched(
+        config: &ProvidersConfig,
+        env_overrides: &HashMap<String, String>,
+        prefetched: &HashMap<String, Vec<DiscoveredModel>>,
+    ) -> Self {
         let mut reg = Self::empty();
 
         // Built-in providers first: they support tool calling.
-        reg.register_builtin_providers(config, env_overrides);
-        reg.register_openai_compatible_providers(config, env_overrides);
-        reg.register_custom_providers(config);
+        reg.register_builtin_providers(config, env_overrides, prefetched);
+        reg.register_openai_compatible_providers(config, env_overrides, prefetched);
+        reg.register_custom_providers(config, prefetched);
 
         #[cfg(feature = "provider-async-openai")]
         {
@@ -1038,12 +1399,12 @@ impl ProviderRegistry {
 
         #[cfg(feature = "provider-openai-codex")]
         {
-            reg.register_openai_codex_providers(config);
+            reg.register_openai_codex_providers(config, prefetched);
         }
 
         #[cfg(feature = "provider-github-copilot")]
         {
-            reg.register_github_copilot_providers(config);
+            reg.register_github_copilot_providers(config, prefetched);
         }
 
         #[cfg(feature = "provider-kimi-code")]
@@ -1058,6 +1419,187 @@ impl ProviderRegistry {
         }
 
         reg
+    }
+
+    /// Fire all provider model discovery HTTP requests concurrently.
+    ///
+    /// Returns a vec of `(provider_key, Receiver)` handles. Each receiver
+    /// will eventually yield the discovered model list. Call
+    /// [`collect_discoveries`] to drain them (blocking).
+    #[allow(unused_mut)] // `pending` may be unused when features are disabled
+    pub fn fire_discoveries(
+        config: &ProvidersConfig,
+        env_overrides: &HashMap<String, String>,
+    ) -> PendingDiscoveries {
+        let mut pending: PendingDiscoveries = Vec::new();
+
+        // ── OpenAI builtin ───────────────────────────────────────────────
+        if config.is_enabled("openai")
+            && !cfg!(test)
+            && let Some(key) = resolve_api_key(config, "openai", "OPENAI_API_KEY", env_overrides)
+            && should_fetch_models(config, "openai")
+        {
+            let base_url = config
+                .get("openai")
+                .and_then(|e| e.base_url.clone())
+                .or_else(|| env_value(env_overrides, "OPENAI_BASE_URL"))
+                .unwrap_or_else(|| "https://api.openai.com/v1".into());
+            pending.push((
+                "openai".into(),
+                openai::start_model_discovery(key.clone(), base_url),
+            ));
+        }
+
+        // ── OpenAI-compatible providers ──────────────────────────────────
+        for def in OPENAI_COMPAT_PROVIDERS {
+            if !config.is_enabled(def.config_name) {
+                continue;
+            }
+
+            let key = resolve_api_key(config, def.config_name, def.env_key, env_overrides);
+            let key = if !def.requires_api_key {
+                key.or_else(|| Some(secrecy::Secret::new(def.config_name.into())))
+            } else if def.config_name == "gemini" {
+                key.or_else(|| env_value(env_overrides, "GOOGLE_API_KEY").map(secrecy::Secret::new))
+            } else {
+                key
+            };
+
+            let Some(key) = key else {
+                continue;
+            };
+
+            let base_url = config
+                .get(def.config_name)
+                .and_then(|e| e.base_url.clone())
+                .or_else(|| env_value(env_overrides, def.env_base_url_key))
+                .unwrap_or_else(|| def.default_base_url.into());
+
+            let preferred = configured_models_for_provider(config, def.config_name);
+
+            if def.local_only {
+                let has_explicit_entry = config.get(def.config_name).is_some();
+                let has_env_base_url = env_value(env_overrides, def.env_base_url_key).is_some();
+                if !has_explicit_entry && !has_env_base_url && preferred.is_empty() {
+                    continue;
+                }
+            }
+
+            let skip_discovery = def.models.is_empty()
+                && preferred.is_empty()
+                && !def.local_only
+                && (def.config_name == "venice" || cfg!(test));
+            let user_opted_in = config
+                .get(def.config_name)
+                .is_some_and(|entry| entry.fetch_models);
+            let try_fetch = def.supports_model_discovery || user_opted_in;
+
+            if !skip_discovery && try_fetch && should_fetch_models(config, def.config_name) {
+                if def.config_name == "ollama" {
+                    pending.push((def.config_name.into(), start_ollama_discovery(&base_url)));
+                } else {
+                    pending.push((
+                        def.config_name.into(),
+                        openai::start_model_discovery(key.clone(), base_url),
+                    ));
+                }
+            }
+        }
+
+        // ── Custom providers ─────────────────────────────────────────────
+        for (name, entry) in &config.providers {
+            if !name.starts_with("custom-") || !entry.enabled {
+                continue;
+            }
+            let Some(api_key) = entry
+                .api_key
+                .as_ref()
+                .filter(|k| !k.expose_secret().is_empty())
+            else {
+                continue;
+            };
+            let Some(base_url) = entry.base_url.as_ref().filter(|u| !u.trim().is_empty()) else {
+                continue;
+            };
+            if should_fetch_models(config, name) {
+                pending.push((
+                    name.clone(),
+                    openai::start_model_discovery(api_key.clone(), base_url.clone()),
+                ));
+            }
+        }
+
+        // ── OpenAI Codex ─────────────────────────────────────────────────
+        #[cfg(feature = "provider-openai-codex")]
+        if oauth_discovery_enabled(config, "openai-codex")
+            && openai_codex::has_stored_tokens()
+            && should_fetch_models(config, "openai-codex")
+            && let Some(rx) = openai_codex::start_model_discovery()
+        {
+            pending.push(("openai-codex".into(), rx));
+        }
+
+        // ── GitHub Copilot ───────────────────────────────────────────────
+        #[cfg(feature = "provider-github-copilot")]
+        if oauth_discovery_enabled(config, "github-copilot")
+            && github_copilot::has_stored_tokens()
+            && should_fetch_models(config, "github-copilot")
+        {
+            pending.push((
+                "github-copilot".into(),
+                github_copilot::start_model_discovery(),
+            ));
+        }
+
+        pending
+    }
+
+    /// Drain all pending discovery receivers (blocking on each `recv()`).
+    ///
+    /// Returns a map from provider name to discovered models.
+    pub fn collect_discoveries(
+        pending: PendingDiscoveries,
+    ) -> HashMap<String, Vec<DiscoveredModel>> {
+        let mut results: HashMap<String, Vec<DiscoveredModel>> = HashMap::new();
+        for (key, rx) in pending {
+            match rx.recv() {
+                Ok(Ok(models)) => {
+                    tracing::debug!(
+                        provider = %key,
+                        model_count = models.len(),
+                        "parallel model discovery succeeded"
+                    );
+                    results.insert(key, models);
+                },
+                Ok(Err(err)) => {
+                    let msg = err.to_string();
+                    if msg.contains("not logged in")
+                        || msg.contains("tokens not found")
+                        || msg.contains("not configured")
+                    {
+                        tracing::debug!(
+                            provider = %key,
+                            error = %err,
+                            "provider not configured, skipping model discovery"
+                        );
+                    } else {
+                        tracing::warn!(
+                            provider = %key,
+                            error = %err,
+                            "parallel model discovery failed"
+                        );
+                    }
+                },
+                Err(err) => {
+                    tracing::warn!(
+                        provider = %key,
+                        error = %err,
+                        "parallel model discovery worker crashed"
+                    );
+                },
+            }
+        }
+        results
     }
 
     #[cfg(feature = "provider-genai")]
@@ -1075,12 +1617,6 @@ impl ProviderRegistry {
                 "Claude Sonnet 4 (genai)",
             ),
             ("OPENAI_API_KEY", "openai", "gpt-4o", "GPT-4o (genai)"),
-            (
-                "GEMINI_API_KEY",
-                "gemini",
-                "gemini-2.0-flash",
-                "Gemini 2.0 Flash (genai)",
-            ),
             (
                 "GROQ_API_KEY",
                 "groq",
@@ -1180,10 +1716,26 @@ impl ProviderRegistry {
     }
 
     #[cfg(feature = "provider-openai-codex")]
-    fn register_openai_codex_providers(&mut self, config: &ProvidersConfig) {
+    fn register_openai_codex_providers(
+        &mut self,
+        config: &ProvidersConfig,
+        prefetched: &HashMap<String, Vec<DiscoveredModel>>,
+    ) {
         let source = OpenAiCodexDiscovery;
         let catalog = if source.should_fetch_models(config) {
-            source.available_models()
+            // Use pre-fetched live models from parallel discovery.
+            let fallback = openai_codex::default_model_catalog();
+            match prefetched.get("openai-codex") {
+                Some(live) => {
+                    let merged = merge_discovered_with_fallback_catalog(live.clone(), fallback);
+                    tracing::info!(
+                        model_count = merged.len(),
+                        "loaded openai-codex models catalog"
+                    );
+                    merged
+                },
+                None => fallback,
+            }
         } else {
             Vec::new()
         };
@@ -1205,10 +1757,26 @@ impl ProviderRegistry {
     }
 
     #[cfg(feature = "provider-github-copilot")]
-    fn register_github_copilot_providers(&mut self, config: &ProvidersConfig) {
+    fn register_github_copilot_providers(
+        &mut self,
+        config: &ProvidersConfig,
+        prefetched: &HashMap<String, Vec<DiscoveredModel>>,
+    ) {
         let source = GitHubCopilotDiscovery;
         let catalog = if source.should_fetch_models(config) {
-            source.available_models()
+            // Use pre-fetched live models from parallel discovery.
+            let fallback = github_copilot::default_model_catalog();
+            match prefetched.get("github-copilot") {
+                Some(live) => {
+                    let merged = merge_discovered_with_fallback_catalog(live.clone(), fallback);
+                    tracing::debug!(
+                        model_count = merged.len(),
+                        "loaded github-copilot models catalog"
+                    );
+                    merged
+                },
+                None => fallback,
+            }
         } else {
             Vec::new()
         };
@@ -1318,9 +1886,6 @@ impl ProviderRegistry {
             return;
         }
 
-        // Log system info once
-        local_gguf::log_system_info_and_suggestions();
-
         // Collect all model IDs to register:
         // 1. From local_models (multi-model config from local-llm.json)
         // 2. From provider models in config (preferred pins)
@@ -1334,6 +1899,11 @@ impl ProviderRegistry {
             );
             return;
         }
+
+        // Only probe local hardware/backends when at least one local model is
+        // configured. On macOS this avoids loading Metal/MLX runtime state
+        // during startup when local inference is not in use.
+        local_gguf::log_system_info_and_suggestions();
 
         // Build config from provider entry for user overrides
         let entry = config.get("local");
@@ -1391,6 +1961,7 @@ impl ProviderRegistry {
         &mut self,
         config: &ProvidersConfig,
         env_overrides: &HashMap<String, String>,
+        prefetched: &HashMap<String, Vec<DiscoveredModel>>,
     ) {
         // Anthropic — register all known Claude models when API key is available.
         if config.is_enabled("anthropic")
@@ -1460,7 +2031,16 @@ impl ProviderRegistry {
                 .unwrap_or(ProviderStreamTransport::Sse);
             let preferred = configured_models_for_provider(config, "openai");
             let discovered = if should_fetch_models(config, "openai") {
-                openai::available_models(&key, &base_url)
+                // Use pre-fetched live models from parallel discovery.
+                let fallback = openai::default_model_catalog();
+                match prefetched.get("openai") {
+                    Some(live) => {
+                        let merged = merge_discovered_with_fallback_catalog(live.clone(), fallback);
+                        tracing::debug!(model_count = merged.len(), "loaded openai models catalog");
+                        merged
+                    },
+                    None => fallback,
+                }
             } else {
                 Vec::new()
             };
@@ -1498,6 +2078,7 @@ impl ProviderRegistry {
         &mut self,
         config: &ProvidersConfig,
         env_overrides: &HashMap<String, String>,
+        prefetched: &HashMap<String, Vec<DiscoveredModel>>,
     ) {
         for def in OPENAI_COMPAT_PROVIDERS {
             if !config.is_enabled(def.config_name) {
@@ -1506,9 +2087,12 @@ impl ProviderRegistry {
 
             let key = resolve_api_key(config, def.config_name, def.env_key, env_overrides);
 
-            // Ollama doesn't require an API key — use a dummy value.
-            let key = if def.config_name == "ollama" {
-                key.or_else(|| Some(secrecy::Secret::new("ollama".into())))
+            // Local providers don't require an API key — use a dummy value.
+            // Gemini accepts both GEMINI_API_KEY and GOOGLE_API_KEY.
+            let key = if !def.requires_api_key {
+                key.or_else(|| Some(secrecy::Secret::new(def.config_name.into())))
+            } else if def.config_name == "gemini" {
+                key.or_else(|| env_value(env_overrides, "GOOGLE_API_KEY").map(secrecy::Secret::new))
             } else {
                 key
             };
@@ -1531,8 +2115,8 @@ impl ProviderRegistry {
                 .map(|entry| entry.stream_transport)
                 .unwrap_or(ProviderStreamTransport::Sse);
             let preferred = configured_models_for_provider(config, def.config_name);
-            if def.config_name == "ollama" {
-                let has_explicit_entry = config.get("ollama").is_some();
+            if def.local_only {
+                let has_explicit_entry = config.get(def.config_name).is_some();
                 let has_env_base_url = env_value(env_overrides, def.env_base_url_key).is_some();
                 if !has_explicit_entry && !has_env_base_url && preferred.is_empty() {
                     continue;
@@ -1543,7 +2127,7 @@ impl ProviderRegistry {
             // OpenRouter supports `/models`, so we discover dynamically.
             let skip_discovery = def.models.is_empty()
                 && preferred.is_empty()
-                && def.config_name != "ollama"
+                && !def.local_only
                 && (def.config_name == "venice" || cfg!(test));
             // Respect `supports_model_discovery`: providers whose API lacks a
             // /models endpoint (e.g. MiniMax) skip live fetch unless the user
@@ -1552,64 +2136,78 @@ impl ProviderRegistry {
                 .get(def.config_name)
                 .is_some_and(|entry| entry.fetch_models);
             let try_fetch = def.supports_model_discovery || user_opted_in;
+            let static_catalog = || -> Vec<DiscoveredModel> {
+                def.models
+                    .iter()
+                    .map(|(id, name)| DiscoveredModel::new(*id, *name))
+                    .collect()
+            };
             let discovered =
                 if !skip_discovery && try_fetch && should_fetch_models(config, def.config_name) {
-                    if def.config_name == "ollama" {
-                        match discover_ollama_models(&base_url) {
-                            Ok(models) => models,
-                            Err(err) => {
-                                tracing::warn!(
-                                    provider = def.config_name,
-                                    error = %err,
-                                    "failed to fetch live models for provider"
-                                );
-                                def.models
-                                    .iter()
-                                    .map(|(id, name)| DiscoveredModel::new(*id, *name))
-                                    .collect()
-                            },
-                        }
-                    } else {
-                        match openai::live_models(&key, &base_url) {
-                            Ok(models) => models,
-                            Err(err) => {
-                                tracing::warn!(
-                                    provider = def.config_name,
-                                    error = %err,
-                                    "failed to fetch live models for provider"
-                                );
-                                def.models
-                                    .iter()
-                                    .map(|(id, name)| DiscoveredModel::new(*id, *name))
-                                    .collect()
-                            },
-                        }
+                    // Use pre-fetched results from parallel discovery.
+                    match prefetched.get(def.config_name) {
+                        Some(models) => models.clone(),
+                        None => static_catalog(),
                     }
                 } else if !def.supports_model_discovery && !def.models.is_empty() {
                     // Provider has no /models endpoint — use the static catalog.
-                    def.models
-                        .iter()
-                        .map(|(id, name)| DiscoveredModel::new(*id, *name))
-                        .collect()
+                    static_catalog()
                 } else {
                     Vec::new()
                 };
             let models = merge_preferred_and_discovered_models(preferred, discovered);
+
+            // Resolve per-provider tool_mode from config (defaults to Auto).
+            let config_tool_mode = config
+                .get(def.config_name)
+                .map(|e| e.tool_mode)
+                .unwrap_or_default();
+
+            // For Ollama, probe each model's family info to decide native vs text
+            // tool calling. For non-Ollama, just pass through the config tool mode.
+            let is_ollama = def.config_name == "ollama";
+
+            // Batch-probe Ollama models for family metadata (best-effort, 3s timeout).
+            let ollama_probes: HashMap<String, OllamaShowResponse> = if is_ollama {
+                probe_ollama_models_batch(&base_url, &models)
+            } else {
+                HashMap::new()
+            };
+
             for model in models {
                 let (model_id, display_name, created_at) =
                     (model.id, model.display_name, model.created_at);
                 if self.has_provider_model(&provider_label, &model_id) {
                     continue;
                 }
-                let provider = Arc::new(
-                    openai::OpenAiProvider::new_with_name(
-                        key.clone(),
-                        model_id.clone(),
-                        base_url.clone(),
-                        provider_label.clone(),
+
+                // Determine effective tool mode for this model.
+                let effective_tool_mode = if is_ollama {
+                    resolve_ollama_tool_mode(
+                        config_tool_mode,
+                        &model_id,
+                        ollama_probes.get(&model_id),
                     )
-                    .with_stream_transport(stream_transport),
-                );
+                } else if !matches!(config_tool_mode, moltis_config::ToolMode::Auto) {
+                    config_tool_mode
+                } else {
+                    // Non-Ollama providers: let OpenAiProvider use its default logic.
+                    moltis_config::ToolMode::Auto
+                };
+
+                let mut oai = openai::OpenAiProvider::new_with_name(
+                    key.clone(),
+                    model_id.clone(),
+                    base_url.clone(),
+                    provider_label.clone(),
+                )
+                .with_stream_transport(stream_transport);
+
+                if !matches!(effective_tool_mode, moltis_config::ToolMode::Auto) {
+                    oai = oai.with_tool_mode(effective_tool_mode);
+                }
+
+                let provider = Arc::new(oai);
                 self.register(
                     ModelInfo {
                         id: model_id,
@@ -1625,7 +2223,11 @@ impl ProviderRegistry {
 
     /// Register custom OpenAI-compatible providers (names starting with `custom-`).
     /// These are user-added endpoints that may support model discovery via `/v1/models`.
-    fn register_custom_providers(&mut self, config: &ProvidersConfig) {
+    fn register_custom_providers(
+        &mut self,
+        config: &ProvidersConfig,
+        prefetched: &HashMap<String, Vec<DiscoveredModel>>,
+    ) {
         for (name, entry) in &config.providers {
             if !name.starts_with("custom-") || !entry.enabled {
                 continue;
@@ -1645,18 +2247,11 @@ impl ProviderRegistry {
 
             let preferred = configured_models_for_provider(config, name);
 
-            // Try model discovery, fall back to configured models.
+            // Use pre-fetched results from parallel discovery.
             let discovered = if should_fetch_models(config, name) {
-                match openai::live_models(api_key, base_url) {
-                    Ok(models) => models,
-                    Err(err) => {
-                        tracing::warn!(
-                            provider = %name,
-                            error = %err,
-                            "failed to fetch live models for custom provider"
-                        );
-                        Vec::new()
-                    },
+                match prefetched.get(name.as_str()) {
+                    Some(models) => models.clone(),
+                    None => Vec::new(),
                 }
             } else {
                 Vec::new()
@@ -1671,21 +2266,24 @@ impl ProviderRegistry {
                 continue;
             }
 
+            let custom_tool_mode = entry.tool_mode;
             for model in models {
                 let (model_id, display_name, created_at) =
                     (model.id, model.display_name, model.created_at);
                 if self.has_provider_model(name, &model_id) {
                     continue;
                 }
-                let provider = Arc::new(
-                    openai::OpenAiProvider::new_with_name(
-                        api_key.clone(),
-                        model_id.clone(),
-                        base_url.clone(),
-                        name.clone(),
-                    )
-                    .with_stream_transport(entry.stream_transport),
-                );
+                let mut oai = openai::OpenAiProvider::new_with_name(
+                    api_key.clone(),
+                    model_id.clone(),
+                    base_url.clone(),
+                    name.clone(),
+                )
+                .with_stream_transport(entry.stream_transport);
+                if !matches!(custom_tool_mode, moltis_config::ToolMode::Auto) {
+                    oai = oai.with_tool_mode(custom_tool_mode);
+                }
+                let provider = Arc::new(oai);
                 self.register(
                     ModelInfo {
                         id: model_id,
@@ -1705,10 +2303,25 @@ impl ProviderRegistry {
     }
 
     pub fn get(&self, model_id: &str) -> Option<Arc<dyn LlmProvider>> {
-        self.resolve_registry_model_id(model_id, None)
+        let (base_id, reasoning) = split_reasoning_suffix(model_id);
+        let provider = self
+            .resolve_registry_model_id(base_id, None)
             .as_deref()
             .and_then(|id| self.providers.get(id))
-            .cloned()
+            .cloned()?;
+        if let Some(effort) = reasoning {
+            let new_provider = Arc::clone(&provider).with_reasoning_effort(effort);
+            if new_provider.is_none() {
+                tracing::warn!(
+                    model_id,
+                    ?effort,
+                    "provider does not support reasoning effort; ignoring suffix"
+                );
+            }
+            Some(new_provider.unwrap_or(provider))
+        } else {
+            Some(provider)
+        }
     }
 
     pub fn first(&self) -> Option<Arc<dyn LlmProvider>> {
@@ -1736,6 +2349,32 @@ impl ProviderRegistry {
 
     pub fn list_models(&self) -> &[ModelInfo] {
         &self.models
+    }
+
+    /// Return the base model list plus reasoning-effort variants for supported models.
+    ///
+    /// For each model that supports extended thinking, three additional entries
+    /// are appended: `<id>@reasoning-low`, `<id>@reasoning-medium`, `<id>@reasoning-high`.
+    /// These virtual IDs are resolved by `get()` back to the base provider with
+    /// the corresponding reasoning effort applied.
+    #[must_use]
+    pub fn list_models_with_reasoning_variants(&self) -> Vec<ModelInfo> {
+        let mut result = Vec::with_capacity(self.models.len() * 4);
+        for m in &self.models {
+            result.push(m.clone());
+            if supports_reasoning_for_model(&m.id) {
+                for &(suffix, _) in REASONING_SUFFIXES {
+                    let label = suffix.strip_prefix("reasoning-").unwrap_or(suffix);
+                    result.push(ModelInfo {
+                        id: format!("{}{REASONING_SUFFIX_SEP}{suffix}", m.id),
+                        provider: m.provider.clone(),
+                        display_name: format!("{} ({label} reasoning)", m.display_name),
+                        created_at: m.created_at,
+                    });
+                }
+            }
+        }
+        result
     }
 
     /// Return all registered providers in registration order.
@@ -2024,6 +2663,14 @@ mod tests {
         assert!(!is_chat_capable_model("gpt-4o-mini-transcribe"));
         assert!(!is_chat_capable_model("sora"));
 
+        // Google Gemini non-chat models
+        assert!(!is_chat_capable_model("imagen-3.0-generate-002"));
+        assert!(!is_chat_capable_model("gemini-embedding-exp"));
+        assert!(!is_chat_capable_model("learnlm-1.5-pro-experimental"));
+        // Gemini chat models pass
+        assert!(is_chat_capable_model("gemini-2.0-flash"));
+        assert!(is_chat_capable_model("gemini-2.5-flash-preview-05-20"));
+
         // Z.AI non-chat models
         assert!(!is_chat_capable_model("glm-image"));
         assert!(!is_chat_capable_model("glm-asr-2512"));
@@ -2141,6 +2788,7 @@ mod tests {
         assert!(!MINIMAX_MODELS.is_empty());
         assert!(!ZAI_MODELS.is_empty());
         assert!(!MOONSHOT_MODELS.is_empty());
+        assert!(!GEMINI_MODELS.is_empty());
     }
 
     #[test]
@@ -2162,6 +2810,7 @@ mod tests {
             MINIMAX_MODELS,
             ZAI_MODELS,
             MOONSHOT_MODELS,
+            GEMINI_MODELS,
         ] {
             let mut ids: Vec<&str> = models.iter().map(|(id, _)| *id).collect();
             ids.sort();
@@ -2353,6 +3002,21 @@ mod tests {
 
         let reg = ProviderRegistry::from_env_with_config_and_overrides(&config, &env_overrides);
         assert!(reg.list_models().iter().any(|m| m.provider == "minimax"));
+    }
+
+    #[test]
+    fn openai_registers_with_generic_provider_env_override() {
+        let config = ProvidersConfig::default();
+        let env_overrides = HashMap::from([
+            ("MOLTIS_PROVIDER".to_string(), "openai".to_string()),
+            (
+                "MOLTIS_API_KEY".to_string(),
+                "sk-test-openai-generic".to_string(),
+            ),
+        ]);
+
+        let reg = ProviderRegistry::from_env_with_config_and_overrides(&config, &env_overrides);
+        assert!(reg.list_models().iter().any(|m| m.provider == "openai"));
     }
 
     #[test]
@@ -2980,5 +3644,406 @@ mod tests {
         assert!(!supports_vision_for_model("my-claude-model"));
         assert!(!supports_vision_for_model("custom-gpt-4o-wrapper"));
         assert!(!supports_vision_for_model("not-gemini-model"));
+    }
+
+    // ── Ollama tool detection ────────────────────────────────────────────
+
+    #[test]
+    fn ollama_native_tools_known_families() {
+        let details = OllamaModelDetails {
+            family: Some("llama".into()),
+            families: Some(vec!["llama3.1".into()]),
+        };
+        assert!(ollama_model_supports_native_tools("llama3.1:8b", &details));
+    }
+
+    #[test]
+    fn ollama_native_tools_qwen_family() {
+        let details = OllamaModelDetails {
+            family: Some("qwen2.5".into()),
+            families: None,
+        };
+        assert!(ollama_model_supports_native_tools("qwen2.5:7b", &details));
+    }
+
+    #[test]
+    fn ollama_native_tools_unknown_family() {
+        let details = OllamaModelDetails {
+            family: Some("phi3".into()),
+            families: None,
+        };
+        // "phi3" is not in the native tool families list, and model name
+        // doesn't match either.
+        assert!(!ollama_model_supports_native_tools("phi3:mini", &details));
+    }
+
+    #[test]
+    fn ollama_native_tools_name_heuristic() {
+        // Even without details, model name matching should work.
+        let details = OllamaModelDetails::default();
+        assert!(ollama_model_supports_native_tools(
+            "llama3.3:70b-instruct",
+            &details
+        ));
+        assert!(!ollama_model_supports_native_tools(
+            "codellama:13b",
+            &details
+        ));
+    }
+
+    #[test]
+    fn resolve_ollama_tool_mode_explicit_override() {
+        use moltis_config::ToolMode;
+        // Explicit modes are passed through regardless of probe result.
+        assert_eq!(
+            resolve_ollama_tool_mode(ToolMode::Native, "anything", None),
+            ToolMode::Native
+        );
+        assert_eq!(
+            resolve_ollama_tool_mode(ToolMode::Text, "anything", None),
+            ToolMode::Text
+        );
+        assert_eq!(
+            resolve_ollama_tool_mode(ToolMode::Off, "anything", None),
+            ToolMode::Off
+        );
+    }
+
+    #[test]
+    fn resolve_ollama_tool_mode_auto_with_probe() {
+        use moltis_config::ToolMode;
+        let show_resp = OllamaShowResponse {
+            details: OllamaModelDetails {
+                family: Some("llama3.1".into()),
+                families: None,
+            },
+            ..Default::default()
+        };
+        assert_eq!(
+            resolve_ollama_tool_mode(ToolMode::Auto, "llama3.1:8b", Some(&show_resp)),
+            ToolMode::Native
+        );
+    }
+
+    #[test]
+    fn resolve_ollama_tool_mode_auto_unknown_model() {
+        use moltis_config::ToolMode;
+        let show_resp = OllamaShowResponse {
+            details: OllamaModelDetails {
+                family: Some("starcoder2".into()),
+                families: None,
+            },
+            ..Default::default()
+        };
+        assert_eq!(
+            resolve_ollama_tool_mode(ToolMode::Auto, "starcoder2:3b", Some(&show_resp)),
+            ToolMode::Text
+        );
+    }
+
+    // ── Ollama capabilities-based tool detection ──────────────────────
+
+    #[test]
+    fn ollama_capabilities_with_tools() {
+        let caps = vec!["completion".into(), "tools".into()];
+        assert_eq!(ollama_capabilities_support_tools(&caps), Some(true));
+    }
+
+    #[test]
+    fn ollama_capabilities_without_tools() {
+        let caps = vec!["completion".into(), "vision".into()];
+        assert_eq!(ollama_capabilities_support_tools(&caps), Some(false));
+    }
+
+    #[test]
+    fn ollama_capabilities_empty_returns_none() {
+        let caps: Vec<String> = vec![];
+        assert_eq!(ollama_capabilities_support_tools(&caps), None);
+    }
+
+    #[test]
+    fn resolve_ollama_tool_mode_capabilities_override_family() {
+        use moltis_config::ToolMode;
+        // Model is NOT in the family whitelist but Ollama reports "tools" capability.
+        let show_resp = OllamaShowResponse {
+            details: OllamaModelDetails {
+                family: Some("minimax".into()),
+                families: None,
+            },
+            capabilities: vec!["completion".into(), "tools".into()],
+        };
+        assert_eq!(
+            resolve_ollama_tool_mode(ToolMode::Auto, "MiniMax-M2.5:latest", Some(&show_resp)),
+            ToolMode::Native
+        );
+    }
+
+    #[test]
+    fn resolve_ollama_tool_mode_capabilities_no_tools() {
+        use moltis_config::ToolMode;
+        // Model has capabilities but "tools" is not among them.
+        let show_resp = OllamaShowResponse {
+            details: OllamaModelDetails {
+                family: Some("llama3.1".into()),
+                families: None,
+            },
+            capabilities: vec!["completion".into()],
+        };
+        // Even though family matches, capabilities say no tools.
+        assert_eq!(
+            resolve_ollama_tool_mode(ToolMode::Auto, "llama3.1:8b", Some(&show_resp)),
+            ToolMode::Text
+        );
+    }
+
+    #[test]
+    fn resolve_ollama_tool_mode_empty_capabilities_falls_back_to_family() {
+        use moltis_config::ToolMode;
+        // Empty capabilities (pre-0.5.x Ollama) — falls back to family whitelist.
+        let show_resp = OllamaShowResponse {
+            details: OllamaModelDetails {
+                family: Some("llama3.1".into()),
+                families: None,
+            },
+            capabilities: vec![],
+        };
+        assert_eq!(
+            resolve_ollama_tool_mode(ToolMode::Auto, "llama3.1:8b", Some(&show_resp)),
+            ToolMode::Native
+        );
+    }
+
+    #[test]
+    fn resolve_ollama_tool_mode_no_probe_result_falls_back_to_name_heuristic() {
+        use moltis_config::ToolMode;
+        // No probe result at all — falls back to model name matching.
+        assert_eq!(
+            resolve_ollama_tool_mode(ToolMode::Auto, "llama3.1:8b", None),
+            ToolMode::Native
+        );
+        assert_eq!(
+            resolve_ollama_tool_mode(ToolMode::Auto, "unknown-model:latest", None),
+            ToolMode::Text
+        );
+    }
+
+    #[test]
+    fn resolve_ollama_tool_mode_explicit_overrides_capabilities() {
+        use moltis_config::ToolMode;
+        // Even with capabilities saying "tools", explicit Text override wins.
+        let show_resp = OllamaShowResponse {
+            details: OllamaModelDetails {
+                family: Some("minimax".into()),
+                families: None,
+            },
+            capabilities: vec!["tools".into()],
+        };
+        assert_eq!(
+            resolve_ollama_tool_mode(ToolMode::Text, "MiniMax-M2.5:latest", Some(&show_resp)),
+            ToolMode::Text
+        );
+        assert_eq!(
+            resolve_ollama_tool_mode(ToolMode::Off, "MiniMax-M2.5:latest", Some(&show_resp)),
+            ToolMode::Off
+        );
+    }
+
+    /// Verify OllamaShowResponse deserializes from Ollama >= 0.5.x JSON with capabilities.
+    #[test]
+    fn ollama_show_response_deserializes_with_capabilities() {
+        let json = r#"{
+            "details": {"family": "minimax", "families": null},
+            "capabilities": ["completion", "tools"]
+        }"#;
+        let resp: OllamaShowResponse = serde_json::from_str(json).unwrap();
+        assert_eq!(resp.details.family.as_deref(), Some("minimax"));
+        assert_eq!(resp.capabilities, vec!["completion", "tools"]);
+    }
+
+    /// Verify OllamaShowResponse deserializes from old Ollama without capabilities field.
+    #[test]
+    fn ollama_show_response_deserializes_without_capabilities() {
+        let json = r#"{"details": {"family": "llama3.1", "families": ["llama3.1"]}}"#;
+        let resp: OllamaShowResponse = serde_json::from_str(json).unwrap();
+        assert_eq!(resp.details.family.as_deref(), Some("llama3.1"));
+        assert!(
+            resp.capabilities.is_empty(),
+            "missing field should default to empty vec"
+        );
+    }
+
+    /// Capabilities with only "tools" (single item).
+    #[test]
+    fn ollama_capabilities_single_tools_entry() {
+        let caps = vec!["tools".into()];
+        assert_eq!(ollama_capabilities_support_tools(&caps), Some(true));
+    }
+
+    #[test]
+    fn openai_provider_supports_tools_respects_override() {
+        use moltis_config::ToolMode;
+        let make = |mode: ToolMode| {
+            openai::OpenAiProvider::new(secret("key"), "gpt-4o".into(), "http://x".into())
+                .with_tool_mode(mode)
+        };
+        assert!(make(ToolMode::Native).supports_tools());
+        assert!(!make(ToolMode::Text).supports_tools());
+        assert!(!make(ToolMode::Off).supports_tools());
+        // Auto falls through to default detection (gpt-4o supports tools).
+        assert!(make(ToolMode::Auto).supports_tools());
+    }
+
+    #[test]
+    fn openai_provider_tool_mode_returns_override() {
+        use moltis_config::ToolMode;
+        let p = openai::OpenAiProvider::new(secret("key"), "gpt-4o".into(), "http://x".into())
+            .with_tool_mode(ToolMode::Text);
+        assert_eq!(p.tool_mode(), Some(ToolMode::Text));
+    }
+
+    #[test]
+    fn openai_provider_tool_mode_default_is_none() {
+        let p = openai::OpenAiProvider::new(secret("key"), "gpt-4o".into(), "http://x".into());
+        assert_eq!(p.tool_mode(), None);
+    }
+
+    #[test]
+    fn split_reasoning_suffix_parses_effort_levels() {
+        use moltis_agents::model::ReasoningEffort;
+        assert_eq!(
+            split_reasoning_suffix("anthropic::claude-opus-4-5@reasoning-high"),
+            ("anthropic::claude-opus-4-5", Some(ReasoningEffort::High))
+        );
+        assert_eq!(
+            split_reasoning_suffix("o3@reasoning-low"),
+            ("o3", Some(ReasoningEffort::Low))
+        );
+        assert_eq!(split_reasoning_suffix("gpt-4o"), ("gpt-4o", None));
+        assert_eq!(
+            split_reasoning_suffix("model@unknown-suffix"),
+            ("model@unknown-suffix", None)
+        );
+    }
+
+    #[test]
+    fn raw_model_id_strips_reasoning_suffix() {
+        assert_eq!(
+            raw_model_id("anthropic::claude-opus-4-5@reasoning-high"),
+            "claude-opus-4-5"
+        );
+        assert_eq!(raw_model_id("o3@reasoning-medium"), "o3");
+        assert_eq!(raw_model_id("gpt-4o"), "gpt-4o");
+    }
+
+    #[test]
+    fn registry_get_resolves_reasoning_suffix() {
+        let mut reg = ProviderRegistry::empty();
+        reg.register(
+            ModelInfo {
+                id: "claude-opus-4-5-20251101".into(),
+                provider: "anthropic".into(),
+                display_name: "Claude Opus 4.5".into(),
+                created_at: None,
+            },
+            Arc::new(anthropic::AnthropicProvider::new(
+                secret("key"),
+                "claude-opus-4-5-20251101".into(),
+                "https://api.anthropic.com".into(),
+            )),
+        );
+
+        // Base model resolves normally.
+        let p = reg.get("anthropic::claude-opus-4-5-20251101");
+        assert!(p.is_some());
+        assert!(p.unwrap().reasoning_effort().is_none());
+
+        // Reasoning variant resolves with effort applied.
+        let p = reg.get("anthropic::claude-opus-4-5-20251101@reasoning-high");
+        assert!(p.is_some());
+        assert_eq!(
+            p.unwrap().reasoning_effort(),
+            Some(moltis_agents::model::ReasoningEffort::High)
+        );
+    }
+
+    #[test]
+    fn list_models_with_reasoning_variants_generates_entries() {
+        let mut reg = ProviderRegistry::empty();
+        reg.register(
+            ModelInfo {
+                id: "claude-opus-4-5-20251101".into(),
+                provider: "anthropic".into(),
+                display_name: "Claude Opus 4.5".into(),
+                created_at: None,
+            },
+            Arc::new(anthropic::AnthropicProvider::new(
+                secret("key"),
+                "claude-opus-4-5-20251101".into(),
+                "https://api.anthropic.com".into(),
+            )),
+        );
+        reg.register(
+            ModelInfo {
+                id: "gpt-4o".into(),
+                provider: "openai".into(),
+                display_name: "GPT-4o".into(),
+                created_at: None,
+            },
+            Arc::new(openai::OpenAiProvider::new(
+                secret("key"),
+                "gpt-4o".into(),
+                "https://api.openai.com/v1".into(),
+            )),
+        );
+
+        let base_count = reg.list_models().len();
+        assert_eq!(base_count, 2);
+
+        let with_variants = reg.list_models_with_reasoning_variants();
+        // claude-opus-4-5 supports reasoning → +3 variants. gpt-4o does not.
+        assert_eq!(with_variants.len(), 5);
+
+        let variant_ids: Vec<&str> = with_variants.iter().map(|m| m.id.as_str()).collect();
+        assert!(variant_ids.contains(&"anthropic::claude-opus-4-5-20251101@reasoning-low"));
+        assert!(variant_ids.contains(&"anthropic::claude-opus-4-5-20251101@reasoning-medium"));
+        assert!(variant_ids.contains(&"anthropic::claude-opus-4-5-20251101@reasoning-high"));
+        // gpt-4o should NOT have variants
+        assert!(!variant_ids.iter().any(|id| id.contains("gpt-4o@")));
+
+        // Variants should be grouped immediately after their base model
+        assert_eq!(variant_ids[0], "anthropic::claude-opus-4-5-20251101");
+        assert_eq!(
+            variant_ids[1],
+            "anthropic::claude-opus-4-5-20251101@reasoning-low"
+        );
+        assert_eq!(
+            variant_ids[2],
+            "anthropic::claude-opus-4-5-20251101@reasoning-medium"
+        );
+        assert_eq!(
+            variant_ids[3],
+            "anthropic::claude-opus-4-5-20251101@reasoning-high"
+        );
+        assert_eq!(variant_ids[4], "openai::gpt-4o");
+    }
+
+    #[test]
+    fn supports_reasoning_for_known_models() {
+        // Models that support reasoning
+        assert!(supports_reasoning_for_model("claude-opus-4-5-20251101"));
+        assert!(supports_reasoning_for_model("claude-sonnet-4-5-20250929"));
+        assert!(supports_reasoning_for_model("claude-3-7-sonnet-20250219"));
+        assert!(supports_reasoning_for_model("o3"));
+        assert!(supports_reasoning_for_model("o3-mini"));
+        assert!(supports_reasoning_for_model("o1"));
+        assert!(supports_reasoning_for_model("o1-mini"));
+        assert!(supports_reasoning_for_model("gemini-2.5-flash"));
+        assert!(supports_reasoning_for_model("deepseek-r1"));
+
+        // Models that don't support reasoning
+        assert!(!supports_reasoning_for_model("claude-sonnet-4-20250514"));
+        assert!(!supports_reasoning_for_model("gpt-4o"));
+        assert!(!supports_reasoning_for_model("gpt-5.2"));
+        assert!(!supports_reasoning_for_model("claude-3-haiku-20240307"));
     }
 }

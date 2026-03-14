@@ -2,6 +2,7 @@
 
 use std::{
     collections::HashMap,
+    path::PathBuf,
     sync::Arc,
     time::{Duration, Instant},
 };
@@ -59,6 +60,9 @@ struct BrowserInstance {
     browser: Browser,
     pages: HashMap<String, Page>,
     last_used: Instant,
+    /// When this instance was first created. Used to enforce a hard TTL that
+    /// prevents Chromium memory leaks from accumulating in long-lived instances.
+    created_at: Instant,
     /// Whether this instance is running in sandbox mode.
     #[allow(dead_code)]
     sandboxed: bool,
@@ -251,8 +255,11 @@ impl BrowserPool {
         Ok(())
     }
 
-    /// Clean up idle browser instances.
+    /// Clean up idle browser instances and instances that have exceeded the
+    /// hard TTL (30 minutes). The TTL prevents Chromium memory leaks from
+    /// accumulating in long-lived browser instances.
     pub async fn cleanup_idle(&self) {
+        const MAX_LIFETIME: Duration = Duration::from_secs(30 * 60);
         let idle_timeout = Duration::from_secs(self.config.idle_timeout_secs);
         let now = Instant::now();
 
@@ -261,10 +268,19 @@ impl BrowserPool {
         {
             let instances = self.instances.read().await;
             for (sid, instance) in instances.iter() {
-                if let Ok(inst) = instance.try_lock()
-                    && now.duration_since(inst.last_used) > idle_timeout
-                {
-                    to_remove.push(sid.clone());
+                if let Ok(inst) = instance.try_lock() {
+                    let idle = now.duration_since(inst.last_used) > idle_timeout;
+                    let expired = now.duration_since(inst.created_at) > MAX_LIFETIME;
+                    if idle || expired {
+                        if expired {
+                            info!(
+                                session_id = sid,
+                                age_secs = inst.created_at.elapsed().as_secs(),
+                                "browser instance exceeded max lifetime"
+                            );
+                        }
+                        to_remove.push(sid.clone());
+                    }
                 }
             }
         }
@@ -276,12 +292,12 @@ impl BrowserPool {
         info!(
             count = to_remove.len(),
             sessions = ?to_remove,
-            "cleaning up idle browser sessions"
+            "cleaning up browser sessions"
         );
 
         for sid in to_remove {
             if let Err(e) = self.close_session(&sid).await {
-                warn!(session_id = sid, error = %e, "failed to close idle session");
+                warn!(session_id = sid, error = %e, "failed to close session");
             }
         }
     }
@@ -323,41 +339,62 @@ impl BrowserPool {
     async fn launch_sandboxed_browser(&self, session_id: &str) -> Result<BrowserInstance, Error> {
         use crate::container;
 
-        // Check container runtime availability (Docker or Apple Container)
-        if !container::is_container_available() {
-            return Err(Error::LaunchFailed(
-                "No container runtime available for sandboxed browser. \
-                 Please install Docker or Apple Container."
-                    .to_string(),
-            ));
-        }
+        // All container operations (CLI checks, image pulls, container start +
+        // readiness polling) use synchronous `std::process::Command` and
+        // `std::thread::sleep`.  Run them on the blocking thread-pool so they
+        // don't stall the tokio event loop.
+        let image = self.config.sandbox_image.clone();
+        let prefix = self.config.container_prefix.clone();
+        let vw = self.config.viewport_width;
+        let vh = self.config.viewport_height;
+        let low_mem = self.config.low_memory_threshold_mb;
+        let profile_dir = sandbox_profile_dir(self.config.resolved_profile_dir(), session_id);
+        let container_host = self.config.container_host.clone();
 
-        // Ensure the container image is available
-        container::ensure_image(&self.config.sandbox_image)
-            .map_err(|e| Error::LaunchFailed(format!("failed to ensure browser image: {e}")))?;
+        let container = tokio::task::spawn_blocking(move || {
+            // Check container runtime availability (Docker or Apple Container)
+            if !container::is_container_available() {
+                return Err(Error::LaunchFailed(
+                    "No container runtime available for sandboxed browser. \
+                     Please install Docker or Apple Container."
+                        .to_string(),
+                ));
+            }
 
-        // Resolve and create profile directory on host if needed
-        let profile_dir = self.config.resolved_profile_dir();
-        if let Some(ref dir) = profile_dir
-            && let Err(e) = std::fs::create_dir_all(dir)
-        {
-            warn!(
-                path = %dir.display(),
-                error = %e,
-                "failed to create browser profile directory for container"
+            // Ensure the container image is available
+            let t_image = Instant::now();
+            container::ensure_image(&image)
+                .map_err(|e| Error::LaunchFailed(format!("failed to ensure browser image: {e}")))?;
+            info!(
+                elapsed_ms = t_image.elapsed().as_millis() as u64,
+                "browser container image ready"
             );
-        }
 
-        // Start the container
-        let container = BrowserContainer::start(
-            &self.config.sandbox_image,
-            &self.config.container_prefix,
-            self.config.viewport_width,
-            self.config.viewport_height,
-            self.config.low_memory_threshold_mb,
-            profile_dir.as_deref(),
-        )
-        .map_err(|e| Error::LaunchFailed(format!("failed to start browser container: {e}")))?;
+            // Create profile directory on host if needed
+            if let Some(ref dir) = profile_dir
+                && let Err(e) = std::fs::create_dir_all(dir)
+            {
+                warn!(
+                    path = %dir.display(),
+                    error = %e,
+                    "failed to create browser profile directory for container"
+                );
+            }
+
+            // Start the container (includes readiness polling)
+            BrowserContainer::start(
+                &image,
+                &prefix,
+                vw,
+                vh,
+                low_mem,
+                profile_dir.as_deref(),
+                &container_host,
+            )
+            .map_err(|e| Error::LaunchFailed(format!("failed to start browser container: {e}")))
+        })
+        .await
+        .map_err(|e| Error::LaunchFailed(format!("container launch task panicked: {e}")))??;
 
         let ws_url = container.websocket_url();
         info!(
@@ -409,6 +446,7 @@ impl BrowserPool {
             browser,
             pages: HashMap::new(),
             last_used: Instant::now(),
+            created_at: Instant::now(),
             sandboxed: true,
             container: Some(container),
         })
@@ -581,6 +619,7 @@ impl BrowserPool {
             browser,
             pages: HashMap::new(),
             last_used: Instant::now(),
+            created_at: Instant::now(),
             sandboxed: false,
             container: None,
         })
@@ -608,6 +647,31 @@ fn generate_session_id() -> String {
     format!("browser-{:016x}", id)
 }
 
+/// Sanitize a session identifier to a filesystem-safe single path segment.
+fn sanitize_session_component(session_id: &str) -> String {
+    let sanitized: String = session_id
+        .chars()
+        .map(|ch| match ch {
+            'a'..='z' | 'A'..='Z' | '0'..='9' | '-' | '_' => ch,
+            _ => '_',
+        })
+        .collect();
+
+    if sanitized.is_empty() {
+        return "session".to_string();
+    }
+
+    sanitized
+}
+
+/// Derive a per-session sandbox profile directory from a configured profile root.
+fn sandbox_profile_dir(profile_root: Option<PathBuf>, session_id: &str) -> Option<PathBuf> {
+    profile_root.map(|root| {
+        root.join("sandbox")
+            .join(sanitize_session_component(session_id))
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -618,6 +682,27 @@ mod tests {
         let id2 = generate_session_id();
         assert_ne!(id1, id2);
         assert!(id1.starts_with("browser-"));
+    }
+
+    #[test]
+    fn sanitize_session_component_replaces_unsafe_chars() {
+        let sanitized = sanitize_session_component("discord:moltis:1476434288646815864");
+        assert_eq!(sanitized, "discord_moltis_1476434288646815864");
+    }
+
+    #[test]
+    fn sandbox_profile_dir_is_namespaced_by_session() {
+        let base = PathBuf::from("/tmp/moltis-profile");
+        let path = sandbox_profile_dir(Some(base), "browser-abc123");
+        assert_eq!(
+            path,
+            Some(PathBuf::from("/tmp/moltis-profile/sandbox/browser-abc123"))
+        );
+    }
+
+    #[test]
+    fn sandbox_profile_dir_none_when_profile_disabled() {
+        assert!(sandbox_profile_dir(None, "browser-abc123").is_none());
     }
 
     fn test_config() -> BrowserConfig {

@@ -23,6 +23,7 @@ hostname               = { workspace = true }
 hyper                  = { optional = true, workspace = true }
 hyper-util             = { optional = true, workspace = true }
 include_dir            = { optional = true, workspace = true }
+mdns-sd                = { optional = true, workspace = true }
 moltis-agents          = { workspace = true }
 moltis-auth            = { workspace = true }
 moltis-browser         = { workspace = true }
@@ -34,12 +35,14 @@ moltis-chat            = { workspace = true }
 moltis-common          = { workspace = true }
 moltis-config          = { workspace = true }
 moltis-cron            = { workspace = true }
+moltis-discord         = { workspace = true }
 moltis-graphql         = { optional = true, workspace = true }
 moltis-mcp             = { workspace = true }
 moltis-media           = { workspace = true }
 moltis-memory          = { workspace = true }
 moltis-metrics         = { optional = true, workspace = true }
 moltis-msteams         = { workspace = true }
+moltis-network-filter  = { features = ["proxy", "service"], optional = true, workspace = true }
 moltis-oauth           = { workspace = true }
 moltis-onboarding      = { workspace = true }
 moltis-openclaw-import = { optional = true, workspace = true }
@@ -53,6 +56,7 @@ moltis-routing         = { workspace = true }
 moltis-service-traits  = { workspace = true }
 moltis-sessions        = { workspace = true }
 moltis-skills          = { workspace = true }
+moltis-slack           = { optional = true, workspace = true }
 moltis-tailscale       = { optional = true, workspace = true }
 moltis-telegram        = { workspace = true }
 moltis-tls             = { optional = true, workspace = true }
@@ -76,7 +80,7 @@ sha2                   = { workspace = true }
 sqlx                   = { workspace = true }
 sysinfo                = { workspace = true }
 thiserror              = { workspace = true }
-time                   = { optional = true, workspace = true }
+time                   = { workspace = true }
 tokio                  = { workspace = true }
 tokio-rustls           = { optional = true, workspace = true }
 tokio-stream           = { workspace = true }
@@ -103,15 +107,20 @@ default = [
   "file-watcher",
   "graphql",
   "local-llm",
+  "local-llm-metal",
+  "mdns",
   "metrics",
   "openclaw-import",
   "prometheus",
   "push-notifications",
   "qmd",
+  "slack",
   "tailscale",
   "tls",
+  "trusted-network",
   "vault",
   "voice",
+  "wasm",
   "web-ui",
   "whatsapp",
 ]
@@ -127,13 +136,21 @@ local-llm = [
   "moltis-provider-setup/local-llm",
   "moltis-providers/local-llm",
 ]
-local-llm-cuda = ["moltis-providers/local-llm-cuda"]
-local-llm-metal = ["moltis-providers/local-llm-metal"]
-metrics = ["dep:moltis-metrics", "moltis-chat/metrics", "moltis-metrics/sqlite"]
+local-llm-cuda = ["local-llm", "moltis-providers/local-llm-cuda"]
+local-llm-metal = ["local-llm", "moltis-providers/local-llm-metal"]
+mdns = ["dep:mdns-sd"]
+metrics = [
+  "dep:moltis-metrics",
+  "moltis-chat/metrics",
+  "moltis-discord/metrics",
+  "moltis-metrics/sqlite",
+  "moltis-msteams/metrics",
+]
 openclaw-import = ["dep:moltis-openclaw-import"]
 prometheus = ["metrics", "moltis-metrics/prometheus"]
 push-notifications = ["dep:chrono", "dep:p256", "dep:web-push", "moltis-chat/push-notifications"]
 qmd = ["dep:moltis-qmd"]
+slack = ["dep:moltis-slack", "moltis-slack/metrics"]
 tailscale = ["dep:moltis-tailscale"]
 tls = [
   "dep:axum-server",
@@ -143,14 +160,15 @@ tls = [
   "dep:rcgen",
   "dep:rustls",
   "dep:rustls-pemfile",
-  "dep:time",
   "dep:tokio-rustls",
   "dep:tower",
 ]
+trusted-network = ["dep:moltis-network-filter"]
 vault = ["dep:moltis-vault", "moltis-auth/vault"]
 voice = ["dep:moltis-voice"]
+wasm = ["moltis-tools/wasm"]
 web-ui = ["dep:include_dir", "dep:portable-pty", "dep:which", "moltis-chat/web-ui"]
-whatsapp = ["dep:moltis-whatsapp", "dep:qrcode"]
+whatsapp = ["dep:moltis-whatsapp", "dep:qrcode", "moltis-whatsapp/metrics"]
 
 [dev-dependencies]
 moltis-web        = { workspace = true }

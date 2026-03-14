@@ -10,7 +10,8 @@ use {
 };
 
 use moltis_channels::{
-    ChannelEvent, ChannelEventSink, Error as ChannelError, Result as ChannelResult,
+    ChannelConfigView, ChannelEvent, ChannelEventSink, Error as ChannelError,
+    Result as ChannelResult,
     gating::{DmPolicy, GroupPolicy, MentionMode, is_allowed},
     message_log::{MessageLog, MessageLogEntry},
     plugin::{
@@ -120,13 +121,26 @@ impl MsTeamsPlugin {
             .await
     }
 
+    /// Ingest an already-verified webhook activity.
+    ///
+    /// Use this when the caller has already verified the secret via
+    /// the channel webhook middleware pipeline.
+    pub async fn ingest_verified_activity(
+        &self,
+        account_id: &str,
+        payload: serde_json::Value,
+    ) -> anyhow::Result<()> {
+        let activity: TeamsActivity = serde_json::from_value(payload)?;
+        self.process_activity(account_id, activity).await
+    }
+
     async fn handle_activity(
         &self,
         account_id: &str,
         activity: TeamsActivity,
         webhook_secret: Option<&str>,
     ) -> anyhow::Result<()> {
-        let (config, event_sink, message_log, service_urls) = {
+        let (config, _event_sink, _message_log, _service_urls) = {
             let accounts = self.accounts.read().unwrap_or_else(|e| e.into_inner());
             let state = accounts
                 .get(account_id)
@@ -148,6 +162,28 @@ impl MsTeamsPlugin {
         {
             anyhow::bail!("invalid Teams webhook secret");
         }
+
+        self.process_activity(account_id, activity).await
+    }
+
+    /// Core activity processing logic, called after authentication.
+    async fn process_activity(
+        &self,
+        account_id: &str,
+        activity: TeamsActivity,
+    ) -> anyhow::Result<()> {
+        let (config, event_sink, message_log, service_urls) = {
+            let accounts = self.accounts.read().unwrap_or_else(|e| e.into_inner());
+            let state = accounts
+                .get(account_id)
+                .ok_or_else(|| anyhow::anyhow!("unknown Teams account: {account_id}"))?;
+            (
+                state.config.clone(),
+                state.event_sink.clone(),
+                state.message_log.clone(),
+                Arc::clone(&state.service_urls),
+            )
+        };
 
         if let (Some(conversation_id), Some(service_url)) =
             (activity.conversation_id(), activity.service_url.as_deref())
@@ -295,6 +331,13 @@ impl MsTeamsPlugin {
             return Ok(());
         }
 
+        #[cfg(feature = "metrics")]
+        moltis_metrics::counter!(
+            moltis_metrics::channels::MESSAGES_RECEIVED_TOTAL,
+            moltis_metrics::labels::CHANNEL => "msteams"
+        )
+        .increment(1);
+
         sink.dispatch_to_chat(&text, reply_to, ChannelMessageMeta {
             channel_type: ChannelType::MsTeams,
             sender_name,
@@ -368,6 +411,71 @@ impl ChannelPlugin for MsTeamsPlugin {
     fn status(&self) -> Option<&dyn ChannelStatus> {
         Some(self)
     }
+
+    fn has_account(&self, account_id: &str) -> bool {
+        let accounts = self.accounts.read().unwrap_or_else(|e| e.into_inner());
+        accounts.contains_key(account_id)
+    }
+
+    fn account_ids(&self) -> Vec<String> {
+        let accounts = self.accounts.read().unwrap_or_else(|e| e.into_inner());
+        accounts.keys().cloned().collect()
+    }
+
+    fn account_config(&self, account_id: &str) -> Option<Box<dyn ChannelConfigView>> {
+        let accounts = self.accounts.read().unwrap_or_else(|e| e.into_inner());
+        accounts
+            .get(account_id)
+            .map(|s| Box::new(s.config.clone()) as Box<dyn ChannelConfigView>)
+    }
+
+    fn account_config_json(&self, account_id: &str) -> Option<serde_json::Value> {
+        let accounts = self.accounts.read().unwrap_or_else(|e| e.into_inner());
+        accounts
+            .get(account_id)
+            .and_then(|s| serde_json::to_value(&s.config).ok())
+    }
+
+    fn update_account_config(
+        &self,
+        account_id: &str,
+        config: serde_json::Value,
+    ) -> ChannelResult<()> {
+        let parsed: MsTeamsAccountConfig = serde_json::from_value(config)?;
+        let mut accounts = self.accounts.write().unwrap_or_else(|e| e.into_inner());
+        if let Some(state) = accounts.get_mut(account_id) {
+            state.config = parsed;
+            Ok(())
+        } else {
+            Err(ChannelError::unknown_account(account_id))
+        }
+    }
+
+    fn shared_outbound(&self) -> Arc<dyn ChannelOutbound> {
+        Arc::new(MsTeamsOutbound {
+            accounts: Arc::clone(&self.accounts),
+        })
+    }
+
+    fn shared_stream_outbound(&self) -> Arc<dyn ChannelStreamOutbound> {
+        Arc::new(MsTeamsOutbound {
+            accounts: Arc::clone(&self.accounts),
+        })
+    }
+
+    fn channel_webhook_verifier(
+        &self,
+        account_id: &str,
+    ) -> Option<Box<dyn moltis_channels::channel_webhook_middleware::ChannelWebhookVerifier>> {
+        let accounts = self.accounts.read().unwrap_or_else(|e| e.into_inner());
+        let state = accounts.get(account_id)?;
+        Some(Box::new(
+            crate::channel_webhook_verifier::TeamsChannelWebhookVerifier::new(
+                state.config.webhook_secret.clone(),
+                true,
+            ),
+        ))
+    }
 }
 
 #[async_trait]
@@ -396,5 +504,32 @@ impl ChannelStatus for MsTeamsPlugin {
                 details: Some("account not started".into()),
             })
         }
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used)]
+mod tests {
+    use {
+        super::*,
+        moltis_channels::{InboundMode, plugin::ChannelType},
+    };
+
+    #[test]
+    fn descriptor_coherence() {
+        let plugin = MsTeamsPlugin::new();
+        let desc = ChannelType::MsTeams.descriptor();
+
+        assert_eq!(desc.channel_type, ChannelType::MsTeams);
+        assert_eq!(desc.display_name, "Microsoft Teams");
+        assert_eq!(desc.capabilities.inbound_mode, InboundMode::Webhook);
+
+        // OTP: MsTeams does NOT implement ChannelOtpProvider
+        assert!(!desc.capabilities.supports_otp);
+        assert!(plugin.as_otp_provider().is_none());
+
+        // Threads: MsTeams does NOT implement ChannelThreadContext
+        assert!(!desc.capabilities.supports_threads);
+        assert!(plugin.thread_context().is_none());
     }
 }

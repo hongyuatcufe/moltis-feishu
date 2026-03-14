@@ -1,5 +1,5 @@
-const { expect, test } = require("@playwright/test");
-const { navigateAndWait, waitForWsConnected, watchPageErrors } = require("../helpers");
+const { expect, test } = require("../base-test");
+const { navigateAndWait, openChatMoreModal, waitForWsConnected, watchPageErrors } = require("../helpers");
 
 function isRetryableRpcError(message) {
 	if (typeof message !== "string") return false;
@@ -65,6 +65,8 @@ async function getChatSeq(page) {
 }
 
 async function openFullContextWithRetry(page) {
+	const chatMoreModal = page.locator("#chatMoreModal");
+	const fullContextModal = page.locator("#fullContextModal");
 	const toggleBtn = page.locator("#fullContextBtn");
 	const panel = page.locator("#fullContextPanel");
 	const copyBtn = panel.getByRole("button", { name: "Copy", exact: true });
@@ -78,12 +80,16 @@ async function openFullContextWithRetry(page) {
 			fullContextRpc?.error?.message?.includes("no LLM providers configured") ||
 			fullContextRpc?.error?.message?.includes("chat not configured");
 
-		const panelVisible = await panel.isVisible().catch(() => false);
-		if (panelVisible) {
-			await toggleBtn.click();
+		if (await fullContextModal.isVisible().catch(() => false)) {
+			await page.locator("#fullContextModalCloseBtn").click();
+			await expect(fullContextModal).toBeHidden({ timeout: 8_000 });
 		}
 
+		await openChatMoreModal(page);
+		await expect(toggleBtn).toBeVisible({ timeout: 8_000 });
 		await toggleBtn.click();
+		await expect(chatMoreModal).toBeHidden({ timeout: 8_000 });
+		await expect(fullContextModal).toBeVisible({ timeout: 8_000 });
 		await expect(panel).toBeVisible();
 
 		const result = await expect
@@ -374,11 +380,10 @@ test.describe("Chat input and slash commands", () => {
 		const llmOutputBtn = panel.getByRole("button", { name: "LLM output", exact: true });
 		await expect(llmOutputBtn).toBeVisible();
 		await expect(llmOutputBtn).toHaveClass(/provider-btn-sm/);
-		await llmOutputBtn.click();
-		const llmOutput = panel.locator("#fullContextLlmOutput");
-		await expect(llmOutput).toBeVisible();
-		const llmOutputText = (await llmOutput.textContent()) || "";
-		expect(llmOutputText).not.toBe("");
+
+		// Stub clipboard before toggling the LLM output panel so that a
+		// WebSocket-triggered panel refresh between the toggle and the copy
+		// click cannot reset the panel state.
 		const stubbedClipboard = await page.evaluate(() => {
 			window.__copiedText = null;
 			try {
@@ -396,6 +401,14 @@ test.describe("Chat input and slash commands", () => {
 			}
 		});
 		expect(stubbedClipboard).toBeTruthy();
+
+		// Toggle the LLM output panel visible and immediately click copy to
+		// minimize the window for a maybeRefreshFullContext() race.
+		await llmOutputBtn.click();
+		const llmOutput = panel.locator("#fullContextLlmOutput");
+		await expect(llmOutput).toBeVisible();
+		const llmOutputText = (await llmOutput.textContent()) || "";
+		expect(llmOutputText).not.toBe("");
 
 		await copyBtn.click();
 		const copied = await page.evaluate(() => window.__copiedText);

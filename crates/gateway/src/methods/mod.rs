@@ -6,10 +6,12 @@ use moltis_protocol::{ErrorShape, ResponseFrame, error_codes};
 
 use crate::state::GatewayState;
 
+mod channel_mux;
 mod gateway;
 mod node;
 mod pairing;
 mod services;
+mod subscribe;
 mod voice;
 
 // ── Types ────────────────────────────────────────────────────────────────────
@@ -23,6 +25,8 @@ pub struct MethodContext {
     pub client_role: String,
     pub client_scopes: Vec<String>,
     pub state: Arc<GatewayState>,
+    /// Optional channel context from the request frame (v4).
+    pub channel: Option<String>,
 }
 
 /// The result a method handler produces.
@@ -74,6 +78,7 @@ const READ_METHODS: &[&str] = &[
     "sessions.preview",
     "sessions.search",
     "sessions.branches",
+    "sessions.run_detail",
     "sessions.share.list",
     "projects.list",
     "projects.get",
@@ -111,8 +116,12 @@ const READ_METHODS: &[&str] = &[
     "memory.config.get",
     "memory.qmd.status",
     "hooks.list",
+    "network.audit.list",
+    "network.audit.tail",
+    "network.audit.stats",
     "openclaw.detect",
     "openclaw.scan",
+    "system.describe",
 ];
 
 const WRITE_METHODS: &[&str] = &[
@@ -147,6 +156,7 @@ const WRITE_METHODS: &[&str] = &[
     "stt.setProvider",
     "voicewake.set",
     "node.invoke",
+    "nodes.set_session",
     "chat.send",
     "chat.abort",
     "chat.cancel_queued",
@@ -220,6 +230,10 @@ const WRITE_METHODS: &[&str] = &[
     "hooks.reload",
     "location.result",
     "openclaw.import",
+    "subscribe",
+    "unsubscribe",
+    "channel.join",
+    "channel.leave",
 ];
 
 const APPROVAL_METHODS: &[&str] = &["exec.approval.request", "exec.approval.resolve"];
@@ -233,6 +247,7 @@ const PAIRING_METHODS: &[&str] = &[
     "device.pair.list",
     "device.pair.approve",
     "device.pair.reject",
+    "device.token.create",
     "device.token.rotate",
     "device.token.revoke",
     "node.rename",
@@ -251,13 +266,13 @@ pub fn authorize_method(method: &str, role: &str, scopes: &[String]) -> Option<E
             return None;
         }
         return Some(ErrorShape::new(
-            error_codes::INVALID_REQUEST,
+            error_codes::FORBIDDEN,
             format!("unauthorized role: {role}"),
         ));
     }
     if role == "node" || role != "operator" {
         return Some(ErrorShape::new(
-            error_codes::INVALID_REQUEST,
+            error_codes::FORBIDDEN,
             format!("unauthorized role: {role}"),
         ));
     }
@@ -269,25 +284,25 @@ pub fn authorize_method(method: &str, role: &str, scopes: &[String]) -> Option<E
 
     if is_in(method, APPROVAL_METHODS) && !has(s::APPROVALS) {
         return Some(ErrorShape::new(
-            error_codes::INVALID_REQUEST,
+            error_codes::UNAUTHORIZED,
             "missing scope: operator.approvals",
         ));
     }
     if is_in(method, PAIRING_METHODS) && !has(s::PAIRING) {
         return Some(ErrorShape::new(
-            error_codes::INVALID_REQUEST,
+            error_codes::UNAUTHORIZED,
             "missing scope: operator.pairing",
         ));
     }
     if is_in(method, READ_METHODS) && !(has(s::READ) || has(s::WRITE)) {
         return Some(ErrorShape::new(
-            error_codes::INVALID_REQUEST,
+            error_codes::UNAUTHORIZED,
             "missing scope: operator.read",
         ));
     }
     if is_in(method, WRITE_METHODS) && !has(s::WRITE) {
         return Some(ErrorShape::new(
-            error_codes::INVALID_REQUEST,
+            error_codes::UNAUTHORIZED,
             "missing scope: operator.write",
         ));
     }
@@ -301,7 +316,7 @@ pub fn authorize_method(method: &str, role: &str, scopes: &[String]) -> Option<E
     }
 
     Some(ErrorShape::new(
-        error_codes::INVALID_REQUEST,
+        error_codes::UNAUTHORIZED,
         "missing scope: operator.admin",
     ))
 }
@@ -346,7 +361,7 @@ impl MethodRegistry {
             return ResponseFrame::err(
                 &request_id,
                 ErrorShape::new(
-                    error_codes::INVALID_REQUEST,
+                    error_codes::UNKNOWN_METHOD,
                     format!("unknown method: {method}"),
                 ),
             );
@@ -380,6 +395,8 @@ impl MethodRegistry {
         node::register(self);
         pairing::register(self);
         services::register(self);
+        subscribe::register(self);
+        channel_mux::register(self);
     }
 }
 
@@ -393,11 +410,17 @@ pub(crate) fn load_disabled_hooks() -> std::collections::HashSet<String> {
 }
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
 
     fn scopes(s: &[&str]) -> Vec<String> {
         s.iter().map(|x| x.to_string()).collect()
+    }
+
+    fn assert_error_code(result: Option<ErrorShape>, expected_code: &str) {
+        let err = result.expect("expected an error");
+        assert_eq!(err.code, expected_code, "wrong error code: {}", err.message);
     }
 
     #[test]
@@ -410,7 +433,10 @@ mod tests {
             )
             .is_none()
         );
-        assert!(authorize_method("channels.senders.list", "operator", &scopes(&[])).is_some());
+        assert_error_code(
+            authorize_method("channels.senders.list", "operator", &scopes(&[])),
+            "UNAUTHORIZED",
+        );
     }
 
     #[test]
@@ -423,13 +449,13 @@ mod tests {
             )
             .is_none()
         );
-        assert!(
+        assert_error_code(
             authorize_method(
                 "channels.senders.approve",
                 "operator",
-                &scopes(&["operator.read"])
-            )
-            .is_some()
+                &scopes(&["operator.read"]),
+            ),
+            "UNAUTHORIZED",
         );
     }
 
@@ -443,13 +469,13 @@ mod tests {
             )
             .is_none()
         );
-        assert!(
+        assert_error_code(
             authorize_method(
                 "channels.senders.deny",
                 "operator",
-                &scopes(&["operator.read"])
-            )
-            .is_some()
+                &scopes(&["operator.read"]),
+            ),
+            "UNAUTHORIZED",
         );
     }
 
@@ -474,9 +500,9 @@ mod tests {
             "channels.senders.approve",
             "channels.senders.deny",
         ] {
-            assert!(
-                authorize_method(method, "node", &scopes(&["operator.admin"])).is_some(),
-                "node role should be denied for {method}"
+            assert_error_code(
+                authorize_method(method, "node", &scopes(&["operator.admin"])),
+                "FORBIDDEN",
             );
         }
     }
@@ -492,7 +518,10 @@ mod tests {
             )
             .is_none()
         );
-        assert!(authorize_method("graphql.config.get", "operator", &scopes(&[])).is_some());
+        assert_error_code(
+            authorize_method("graphql.config.get", "operator", &scopes(&[])),
+            "UNAUTHORIZED",
+        );
     }
 
     #[cfg(feature = "graphql")]
@@ -506,13 +535,13 @@ mod tests {
             )
             .is_none()
         );
-        assert!(
+        assert_error_code(
             authorize_method(
                 "graphql.config.set",
                 "operator",
-                &scopes(&["operator.read"])
-            )
-            .is_some()
+                &scopes(&["operator.read"]),
+            ),
+            "UNAUTHORIZED",
         );
     }
 
@@ -526,7 +555,10 @@ mod tests {
             )
             .is_none()
         );
-        assert!(authorize_method("agent.identity.get", "operator", &scopes(&[])).is_some());
+        assert_error_code(
+            authorize_method("agent.identity.get", "operator", &scopes(&[])),
+            "UNAUTHORIZED",
+        );
     }
 
     #[test]
@@ -539,13 +571,13 @@ mod tests {
             )
             .is_none()
         );
-        assert!(
+        assert_error_code(
             authorize_method(
                 "agent.identity.update",
                 "operator",
-                &scopes(&["operator.read"])
-            )
-            .is_some()
+                &scopes(&["operator.read"]),
+            ),
+            "UNAUTHORIZED",
         );
     }
 
@@ -559,13 +591,13 @@ mod tests {
             )
             .is_none()
         );
-        assert!(
+        assert_error_code(
             authorize_method(
                 "agent.identity.update_soul",
                 "operator",
-                &scopes(&["operator.read"])
-            )
-            .is_some()
+                &scopes(&["operator.read"]),
+            ),
+            "UNAUTHORIZED",
         );
     }
 
@@ -576,9 +608,9 @@ mod tests {
                 authorize_method(method, "operator", &scopes(&["operator.read"])).is_none(),
                 "read scope should authorize {method}"
             );
-            assert!(
-                authorize_method(method, "operator", &scopes(&[])).is_some(),
-                "no scope should deny {method}"
+            assert_error_code(
+                authorize_method(method, "operator", &scopes(&[])),
+                "UNAUTHORIZED",
             );
         }
     }
@@ -590,9 +622,9 @@ mod tests {
                 authorize_method(method, "operator", &scopes(&["operator.write"])).is_none(),
                 "write scope should authorize {method}"
             );
-            assert!(
-                authorize_method(method, "operator", &scopes(&["operator.read"])).is_some(),
-                "read-only scope should deny {method}"
+            assert_error_code(
+                authorize_method(method, "operator", &scopes(&["operator.read"])),
+                "UNAUTHORIZED",
             );
         }
     }
@@ -600,7 +632,10 @@ mod tests {
     #[test]
     fn hooks_list_requires_read() {
         assert!(authorize_method("hooks.list", "operator", &scopes(&["operator.read"])).is_none());
-        assert!(authorize_method("hooks.list", "operator", &scopes(&[])).is_some());
+        assert_error_code(
+            authorize_method("hooks.list", "operator", &scopes(&[])),
+            "UNAUTHORIZED",
+        );
     }
 
     #[test]
@@ -615,11 +650,67 @@ mod tests {
                 authorize_method(method, "operator", &scopes(&["operator.write"])).is_none(),
                 "write scope should authorize {method}"
             );
-            assert!(
-                authorize_method(method, "operator", &scopes(&["operator.read"])).is_some(),
-                "read-only scope should deny {method}"
+            assert_error_code(
+                authorize_method(method, "operator", &scopes(&["operator.read"])),
+                "UNAUTHORIZED",
             );
         }
+    }
+
+    #[test]
+    fn unknown_method_returns_unknown_code() {
+        use crate::{
+            auth::{AuthMode, ResolvedAuth},
+            services::GatewayServices,
+            state::GatewayState,
+        };
+
+        let reg = MethodRegistry::new();
+        let ctx = MethodContext {
+            request_id: "test".into(),
+            method: "nonexistent.method".into(),
+            params: serde_json::Value::Null,
+            client_conn_id: "conn-1".into(),
+            client_role: "operator".into(),
+            client_scopes: scopes(&["operator.admin"]),
+            state: GatewayState::new(
+                ResolvedAuth {
+                    mode: AuthMode::Token,
+                    token: None,
+                    password: None,
+                },
+                GatewayServices::noop(),
+            ),
+            channel: None,
+        };
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .build()
+            .expect("runtime");
+        let resp = rt.block_on(reg.dispatch(ctx));
+        assert!(!resp.ok);
+        assert_eq!(
+            resp.error.as_ref().map(|e| e.code.as_str()),
+            Some("UNKNOWN_METHOD")
+        );
+    }
+
+    #[test]
+    fn subscribe_method_authorized_with_write() {
+        assert!(authorize_method("subscribe", "operator", &scopes(&["operator.write"])).is_none());
+    }
+
+    #[test]
+    fn channel_join_authorized_with_write() {
+        assert!(
+            authorize_method("channel.join", "operator", &scopes(&["operator.write"])).is_none()
+        );
+    }
+
+    #[test]
+    fn system_describe_authorized_with_read() {
+        assert!(
+            authorize_method("system.describe", "operator", &scopes(&["operator.read"])).is_none()
+        );
     }
 
     #[test]

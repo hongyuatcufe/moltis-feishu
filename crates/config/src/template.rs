@@ -25,7 +25,7 @@ bind = "127.0.0.1"                # Address to bind to ("0.0.0.0" for all interf
 port = {port}                           # Port number (auto-generated for this installation)
 http_request_logs = false              # Enable verbose Axum HTTP request/response logs (debugging)
 ws_request_logs = false                # Enable WebSocket RPC request/response logs (debugging)
-update_repository_url = "https://github.com/moltis-org/moltis"    # GitHub repo used for update checks (comment out to disable)
+update_releases_url = "https://www.moltis.org/releases.json"    # Releases manifest URL for update checks (override to use a custom URL)
 
 # ══════════════════════════════════════════════════════════════════════════════
 # AUTHENTICATION
@@ -121,8 +121,10 @@ models = ["gpt-5.3", "gpt-5.2"]              # Preferred models shown first
 # ── Google Gemini ─────────────────────────────────────────────
 # [providers.gemini]
 # enabled = true
-# api_key = "..."                             # Or set GOOGLE_API_KEY env var
-# models = ["gemini-2.0-flash"]
+# api_key = "..."                             # Or set GEMINI_API_KEY / GOOGLE_API_KEY env var
+# models = ["gemini-2.5-flash-preview-05-20", "gemini-2.0-flash"]
+# fetch_models = true
+# base_url = "https://generativelanguage.googleapis.com/v1beta/openai"
 # alias = "gemini"
 
 # ── Groq ──────────────────────────────────────────────────────
@@ -182,6 +184,21 @@ message_queue_mode = "followup"   # Default: process queued messages one-by-one 
 # allowed_models = ["gpt 5.2"]  # Legacy field (currently ignored).
 
 # ══════════════════════════════════════════════════════════════════════════════
+# SPAWN PRESETS (OPTIONAL)
+# ══════════════════════════════════════════════════════════════════════════════
+# Configure reusable presets for the `spawn_agent` tool.
+#
+# [agents]
+# default_preset = "research"      # Optional: used when spawn_agent.preset is omitted
+#
+# [agents.presets.research]
+# model = "openai/gpt-5.2"
+# allow_tools = ["web_search", "web_fetch", "sessions_send", "task_list"]
+# deny_tools = ["exec"]
+# delegate_only = false
+# system_prompt_suffix = "Focus on gathering and summarizing evidence."
+
+# ══════════════════════════════════════════════════════════════════════════════
 # TOOLS
 # ══════════════════════════════════════════════════════════════════════════════
 
@@ -230,6 +247,7 @@ workspace_mount = "ro"            # How to mount workspace in sandbox:
                                   #   "ro"   - Read-only (safe)
                                   #   "rw"   - Read-write (can modify files)
                                   #   "none" - No mount
+# host_data_dir = "/host/path/data"  # Optional override if auto-detection cannot resolve the host-visible data dir
 home_persistence = "shared"       # Persist /home/sandbox across container recreation:
                                   #   "off"     - Ephemeral home
                                   #   "session" - Per-session persisted home
@@ -306,6 +324,7 @@ packages = [
     "tzdata",
     "shellcheck",
     "patchelf",
+    "tmux",
     # Text processing & search
     "ripgrep",
     # Browser automation dependencies
@@ -425,6 +444,8 @@ max_instances = 3                 # Maximum concurrent browser instances
 idle_timeout_secs = 300           # Close idle browsers after this many seconds (5 min)
 navigation_timeout_ms = 30000     # Page load timeout in milliseconds (30 sec)
 sandbox = false                   # Run browser in Docker/Apple Container for isolation
+# container_host = "127.0.0.1"   # Host/IP to reach browser container (default: localhost)
+                                  # Set to "host.docker.internal" when Moltis runs inside Docker
 # chrome_path = "/path/to/chrome" # Custom Chrome/Chromium binary path (auto-detected)
 # user_agent = "Custom UA"        # Custom user agent string
 # chrome_args = []                # Extra Chrome command-line arguments
@@ -469,6 +490,7 @@ auto_load = []                    # Skills to always load without explicit activ
 # enabled = true                  # Whether this server is enabled
 # transport = "stdio"             # Transport: "stdio" (default) or "sse"
 # url = "http://..."              # URL for SSE transport
+# headers = {{ Authorization = "Bearer ${{TOKEN}}" }}  # Optional HTTP headers for SSE transport
 
 # Example: Filesystem access
 # [mcp.servers.filesystem]
@@ -486,7 +508,8 @@ auto_load = []                    # Skills to always load without explicit activ
 # Example: SSE server
 # [mcp.servers.remote]
 # transport = "sse"
-# url = "http://localhost:8080/mcp"
+# url = "http://localhost:8080/mcp?api_key=$REMOTE_MCP_KEY"
+# headers = {{ "x-api-key" = "${{REMOTE_MCP_KEY}}" }}
 # enabled = true
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -511,6 +534,9 @@ every = "30m"                     # Interval between heartbeats (e.g., "30m", "1
 # model = "anthropic/claude-sonnet-4-20250514"  # Override model for heartbeats
 # prompt = "..."                  # Custom heartbeat prompt (default: built-in)
 ack_max_chars = 300               # Max characters for acknowledgment reply
+deliver = false                   # Deliver heartbeat replies to a channel account
+# channel = "my-bot"              # Channel account identifier (required when deliver = true)
+# to = "123456789"                # Chat/recipient ID (required when deliver = true)
 sandbox_enabled = true            # Run heartbeat commands in sandbox
 # sandbox_image = "..."           # Override sandbox image for heartbeats
 
@@ -595,7 +621,16 @@ reset_on_exit = true              # Reset serve/funnel when gateway shuts down
 # Telegram bots
 # [channels.telegram.my-bot]
 # token = "..."                   # Bot token from @BotFather
-# allowed_users = []              # Telegram user IDs allowed to chat (empty = all)
+# dm_policy = "allowlist"         # "open", "allowlist", or "disabled"
+# group_policy = "open"           # "open", "allowlist", or "disabled"
+# mention_mode = "mention"        # "mention", "always", or "none"
+# allowlist = []                  # Telegram user IDs or usernames (strings)
+# group_allowlist = []            # Telegram group/chat IDs (strings)
+# reply_to_message = false        # Send responses as Telegram replies
+# otp_self_approval = true        # OTP self-approval for non-allowlisted DM users
+# otp_cooldown_secs = 300         # Cooldown after 3 failed OTP attempts
+# stream_mode = "edit_in_place"   # "edit_in_place" or "off"
+# edit_throttle_ms = 300          # Min ms between streaming edits
 
 # Microsoft Teams bots
 # [channels.msteams.my-bot]
@@ -614,6 +649,36 @@ reset_on_exit = true              # Reset serve/funnel when gateway shuts down
 # agent_id = "main"               # Default agent for this bot
 # allow_agent_switch = false      # Allow /agent switching (true for multi-agent bot)
 # session_auto_archive_days = 30  # Auto-archive non-active sessions after N days (0 disables)
+# Discord bots
+# [channels.discord.my-bot]
+# token = "..."                   # Bot token from Discord Developer Portal
+# dm_policy = "allowlist"         # "open", "allowlist", or "disabled"
+# group_policy = "open"           # "open", "allowlist", or "disabled"
+# mention_mode = "mention"        # "mention", "always", or "none"
+# allowlist = []                  # Discord user IDs allowed to DM
+# guild_allowlist = []            # Discord guild/server IDs (empty = all)
+# reply_to_message = false        # Send responses as Discord replies
+# ack_reaction = "👀"             # Emoji reaction while processing (omit to disable)
+# activity = "with AI"            # Bot activity status text
+# activity_type = "custom"        # "playing", "listening", "watching", "competing", or "custom"
+# status = "online"               # "online", "idle", "dnd", or "invisible"
+# otp_self_approval = true        # OTP self-approval for non-allowlisted DM users
+# otp_cooldown_secs = 300         # Cooldown after 3 failed OTP attempts
+
+# Slack bots
+# [channels.slack.my-bot]
+# bot_token = "xoxb-..."          # Bot user OAuth token
+# app_token = "xapp-..."          # App-level token for Socket Mode
+# connection_mode = "socket_mode" # "socket_mode" or "events_api"
+# signing_secret = "..."          # Required for events_api mode
+# dm_policy = "allowlist"         # "open", "allowlist", or "disabled"
+# group_policy = "open"           # "open", "allowlist", or "disabled"
+# mention_mode = "mention"        # "mention", "always", or "none"
+# allowlist = []                  # Slack user IDs (strings)
+# channel_allowlist = []          # Slack channel IDs (strings)
+# stream_mode = "edit_in_place"   # "edit_in_place", "native", or "off"
+# edit_throttle_ms = 500          # Min ms between streaming edits
+# thread_replies = true           # Reply in threads
 
 # ══════════════════════════════════════════════════════════════════════════════
 # HOOKS

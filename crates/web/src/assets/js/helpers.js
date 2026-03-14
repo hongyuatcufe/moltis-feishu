@@ -153,14 +153,19 @@ function renderTables(s) {
 export function renderMarkdown(raw) {
 	var s = esc(raw);
 	var codeBlocks = [];
-	s = s.replace(/```(\w*)\n([\s\S]*?)```/g, (_, _lang, code) => `@@MOLTIS_CODE_BLOCK_${codeBlocks.push(code) - 1}@@`);
+	s = s.replace(/```(\w*)\n([\s\S]*?)```/g, (_, lang, code) => {
+		codeBlocks.push({ lang: lang, code: code });
+		return `@@MOLTIS_CODE_BLOCK_${codeBlocks.length - 1}@@`;
+	});
 	s = renderTables(s);
 	s = s.replace(/`([^`]+)`/g, "<code>$1</code>");
 	s = s.replace(/\*\*(.+?)\*\*/g, "<strong>$1</strong>");
 	s = s.replace(/@@MOLTIS_CODE_BLOCK_(\d+)@@/g, (_, idx) => {
-		var code = codeBlocks[Number(idx)];
-		if (typeof code !== "string") return "";
-		return `<pre><code>${code}</code></pre>`;
+		var block = codeBlocks[Number(idx)];
+		if (!block) return "";
+		var langAttr = block.lang ? ` data-lang="${block.lang}"` : "";
+		var badge = block.lang ? `<div class="code-lang-badge">${block.lang}</div>` : "";
+		return `<pre class="code-block">${badge}<code${langAttr}>${block.code}</code></pre>`;
 	});
 	return s;
 }
@@ -888,11 +893,14 @@ export function renderMapPointGroups(container, points, fallbackLabel) {
  */
 export function parseAgentsListPayload(payload) {
 	if (Array.isArray(payload)) {
-		return { defaultId: "main", agents: payload };
+		var legacyDefault = payload.find((agent) => agent?.is_default === true && typeof agent?.id === "string")?.id;
+		return { defaultId: legacyDefault || "main", agents: payload };
 	}
+	var agents = Array.isArray(payload?.agents) ? payload.agents : [];
+	var inferredDefault = agents.find((agent) => agent?.is_default === true && typeof agent?.id === "string")?.id;
 	return {
-		defaultId: typeof payload?.default_id === "string" ? payload.default_id : "main",
-		agents: Array.isArray(payload?.agents) ? payload.agents : [],
+		defaultId: typeof payload?.default_id === "string" ? payload.default_id : inferredDefault || "main",
+		agents: agents,
 	};
 }
 

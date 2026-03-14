@@ -39,6 +39,13 @@ export var modelDropdownList = null;
 export var selectedModelId = localStorage.getItem("moltis-model") || "";
 export var modelIdx = -1;
 
+// Node selector elements — created dynamically inside the chat page
+export var nodeCombo = null;
+export var nodeComboBtn = null;
+export var nodeComboLabel = null;
+export var nodeDropdown = null;
+export var nodeDropdownList = null;
+
 // Session project combo (in chat header)
 export var projectCombo = null;
 export var projectComboBtn = null;
@@ -88,6 +95,9 @@ export var sandboxInfo = null;
 
 // Logs
 export var logsEventHandler = null;
+
+// Network audit
+export var networkAuditEventHandler = null;
 export var unseenErrors = 0;
 export var unseenWarns = 0;
 
@@ -187,6 +197,21 @@ export function setSelectedModelId(v) {
 export function setModelIdx(v) {
 	modelIdx = v;
 }
+export function setNodeCombo(v) {
+	nodeCombo = v;
+}
+export function setNodeComboBtn(v) {
+	nodeComboBtn = v;
+}
+export function setNodeComboLabel(v) {
+	nodeComboLabel = v;
+}
+export function setNodeDropdown(v) {
+	nodeDropdown = v;
+}
+export function setNodeDropdownList(v) {
+	nodeDropdownList = v;
+}
 export function setProjectCombo(v) {
 	projectCombo = v;
 }
@@ -270,6 +295,9 @@ export function setChannelEventUnsub(v) {
 }
 export function setLogsEventHandler(v) {
 	logsEventHandler = v;
+}
+export function setNetworkAuditEventHandler(v) {
+	networkAuditEventHandler = v;
 }
 export function setUnseenErrors(v) {
 	unseenErrors = v;

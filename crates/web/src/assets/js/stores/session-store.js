@@ -4,7 +4,6 @@
 // Session class instance with per-session signals for client-side state.
 
 import { computed, signal } from "@preact/signals";
-import { sendRpc } from "../helpers.js";
 
 // ── Session class ────────────────────────────────────────────
 
@@ -28,6 +27,7 @@ export class Session {
 		this.parentSessionKey = serverData.parentSessionKey || "";
 		this.forkPoint = serverData.forkPoint != null ? serverData.forkPoint : null;
 		this.agent_id = serverData.agent_id || "main";
+		this.node_id = serverData.node_id || null;
 		this.mcpDisabled = serverData.mcpDisabled;
 		this.archived = serverData.archived;
 		this.activeChannel = serverData.activeChannel;
@@ -83,6 +83,7 @@ export class Session {
 		this.parentSessionKey = serverData.parentSessionKey || "";
 		this.forkPoint = serverData.forkPoint != null ? serverData.forkPoint : null;
 		this.agent_id = serverData.agent_id || "main";
+		this.node_id = serverData.node_id || null;
 		this.mcpDisabled = serverData.mcpDisabled;
 		this.archived = serverData.archived;
 		this.activeChannel = serverData.activeChannel;
@@ -121,6 +122,8 @@ export var sessions = signal([]);
 export var activeSessionKey = signal(localStorage.getItem("moltis-session") || "main");
 export var switchInProgress = signal(false);
 export var refreshInProgressKey = signal("");
+/** Session list tab filter: "all" | "sessions" | "cron" */
+export var sessionListTab = signal(localStorage.getItem("moltis-session-tab") || "sessions");
 
 export var activeSession = computed(() => {
 	var key = activeSessionKey.value;
@@ -177,12 +180,32 @@ export function upsert(serverData) {
 	return next;
 }
 
-/** Fetch sessions from the server via RPC. */
+/** Remove a session by key. Returns true when a session was removed. */
+export function remove(key) {
+	if (!key) return false;
+	var existing = getByKey(key);
+	if (!existing) return false;
+	sessions.value = sessions.value.filter((session) => session.key !== key);
+	if (activeSessionKey.value === key) {
+		var fallback = sessions.value.find((session) => session.key === "main")?.key || sessions.value[0]?.key || "main";
+		activeSessionKey.value = fallback;
+		localStorage.setItem("moltis-session", fallback);
+	}
+	return true;
+}
+
+/** Fetch sessions from the server via HTTP (gzip-friendly). */
 export function fetch() {
-	return sendRpc("sessions.list", {}).then((res) => {
-		if (!res?.ok) return;
-		setAll(res.payload || []);
-	});
+	return window
+		.fetch("/api/sessions", {
+			headers: { Accept: "application/json" },
+		})
+		.then((response) => (response.ok ? response.json() : null))
+		.then((payload) => {
+			if (!Array.isArray(payload)) return;
+			setAll(payload);
+		})
+		.catch(() => {});
 }
 
 /** Notify Preact that session data changed (triggers re-render). */
@@ -201,17 +224,26 @@ export function setActive(key) {
 	localStorage.setItem("moltis-session", key);
 }
 
+/** Set the session list tab and persist it. */
+export function setSessionListTab(tab) {
+	sessionListTab.value = tab;
+	localStorage.setItem("moltis-session-tab", tab);
+}
+
 export var sessionStore = {
 	sessions,
 	activeSessionKey,
 	activeSession,
 	switchInProgress,
 	refreshInProgressKey,
+	sessionListTab,
 	Session,
 	setAll,
 	upsert,
+	remove,
 	fetch,
 	getByKey,
 	setActive,
+	setSessionListTab,
 	notify,
 };

@@ -8,6 +8,10 @@ enum SettingsGroup: String, CaseIterable, Hashable {
     case integrations = "Integrations"
     case systems = "Systems"
 
+    var title: String {
+        NSLocalizedString(rawValue, comment: "Settings group title")
+    }
+
     var sections: [SettingsSection] {
         SettingsSection.allCases.filter { $0.group == self }
     }
@@ -29,16 +33,26 @@ enum SettingsSection: String, CaseIterable, Hashable {
     case skills = "Skills"
     case voice = "Voice"
     case sandboxes = "Sandboxes"
+    case networkAudit = "Network Audit"
     case monitoring = "Monitoring"
     case logs = "Logs"
     case graphql = "GraphQL"
     case httpd = "HTTP Server"
     case configuration = "Configuration"
 
-    var title: String { rawValue }
+    var title: String {
+        NSLocalizedString(rawValue, comment: "Settings section title")
+    }
 
     var icon: String {
         Self.iconMap[self] ?? "gearshape"
+    }
+
+    var accessibilityIdentifier: String {
+        let normalized = rawValue
+            .lowercased()
+            .replacingOccurrences(of: " ", with: "-")
+        return "settings-section-\(normalized)"
     }
 
     var iconColor: Color {
@@ -66,6 +80,7 @@ enum SettingsSection: String, CaseIterable, Hashable {
         .skills:        "sparkles",
         .voice:         "mic.fill",
         .sandboxes:     "shippingbox.fill",
+        .networkAudit:  "network.badge.shield.half.filled",
         .monitoring:    "chart.bar.fill",
         .logs:          "doc.plaintext.fill",
         .graphql:       "point.3.connected.trianglepath.dotted",
@@ -89,6 +104,7 @@ enum SettingsSection: String, CaseIterable, Hashable {
         .skills:        .yellow,
         .voice:         .mint,
         .sandboxes:     .orange,
+        .networkAudit:  .cyan,
         .monitoring:    .green,
         .logs:          .secondary,
         .graphql:       .pink,
@@ -112,6 +128,7 @@ enum SettingsSection: String, CaseIterable, Hashable {
         .skills:        .integrations,
         .voice:         .integrations,
         .sandboxes:     .systems,
+        .networkAudit:  .systems,
         .monitoring:    .systems,
         .logs:          .systems,
         .graphql:       .systems,
@@ -127,15 +144,25 @@ struct SettingsView: View {
     @ObservedObject var settings: AppSettings
     @ObservedObject var providerStore: ProviderStore
     @ObservedObject var logStore: LogStore
+    @ObservedObject var networkAuditStore: NetworkAuditStore
     @State private var selectedSection: SettingsSection? = .identity
     @State private var searchText = ""
-    @FocusState private var focusedField: String?
+
+    private func isSectionVisible(_ section: SettingsSection) -> Bool {
+        switch section {
+        case .security, .tailscale:
+            return settings.httpdEnabled
+        default:
+            return true
+        }
+    }
 
     private var filteredGroups: [(group: SettingsGroup, sections: [SettingsSection])] {
         let query = searchText.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
         return SettingsGroup.allCases.compactMap { group in
             let sections = group.sections.filter { section in
-                query.isEmpty || section.title.lowercased().contains(query)
+                isSectionVisible(section)
+                    && (query.isEmpty || section.title.lowercased().contains(query))
             }
             return sections.isEmpty ? nil : (group, sections)
         }
@@ -169,7 +196,7 @@ struct SettingsView: View {
 
             List(selection: $selectedSection) {
                 ForEach(filteredGroups, id: \.group) { item in
-                    Section(item.group.rawValue) {
+                    Section(item.group.title) {
                         ForEach(item.sections, id: \.self) { section in
                             Label {
                                 Text(section.title)
@@ -180,6 +207,7 @@ struct SettingsView: View {
                                 )
                             }
                             .tag(section)
+                            .accessibilityIdentifier(section.accessibilityIdentifier)
                         }
                     }
                 }
@@ -194,7 +222,10 @@ struct SettingsView: View {
     private var settingsDetail: some View {
         Group {
             if let section = selectedSection {
-                if section == .logs {
+                if section == .networkAudit {
+                    NetworkAuditPane(store: networkAuditStore)
+                        .frame(maxWidth: .infinity, maxHeight: .infinity)
+                } else if section == .logs {
                     LogsPane(logStore: logStore)
                         .frame(maxWidth: .infinity, maxHeight: .infinity)
                 } else if section == .configuration {
@@ -210,7 +241,6 @@ struct SettingsView: View {
                         )
                     }
                     .formStyle(.grouped)
-                    .focused($focusedField, equals: "none")
                 }
             } else {
                 VStack(spacing: 8) {
@@ -222,6 +252,17 @@ struct SettingsView: View {
                         .foregroundStyle(.secondary)
                 }
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
+            }
+        }
+        .onAppear {
+            if !settings.isLoaded {
+                settings.load()
+            }
+        }
+        .onChange(of: settings.httpdEnabled) { _, enabled in
+            guard let section = selectedSection else { return }
+            if !enabled && (section == .security || section == .tailscale) {
+                selectedSection = .identity
             }
         }
     }

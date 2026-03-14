@@ -11,6 +11,7 @@ use std::{
 use {async_trait::async_trait, secrecy::ExposeSecret, tracing::{info, warn}};
 
 use moltis_channels::{
+    ChannelConfigView,
     ChannelEventSink, Error as ChannelError, Result as ChannelResult,
     message_log::MessageLog,
     plugin::{
@@ -194,6 +195,41 @@ impl ChannelPlugin for FeishuPlugin {
 
     fn status(&self) -> Option<&dyn ChannelStatus> {
         Some(self)
+    }
+
+    fn has_account(&self, account_id: &str) -> bool {
+        FeishuPlugin::has_account(self, account_id)
+    }
+
+    fn account_ids(&self) -> Vec<String> {
+        FeishuPlugin::account_ids(self)
+    }
+
+    fn account_config(&self, account_id: &str) -> Option<Box<dyn ChannelConfigView>> {
+        let accounts = self.accounts.read().unwrap_or_else(|e| e.into_inner());
+        accounts
+            .get(account_id)
+            .map(|state| Box::new(state.config.clone()) as Box<dyn ChannelConfigView>)
+    }
+
+    fn update_account_config(
+        &self,
+        account_id: &str,
+        config: serde_json::Value,
+    ) -> ChannelResult<()> {
+        FeishuPlugin::update_account_config(self, account_id, config)
+    }
+
+    fn shared_outbound(&self) -> Arc<dyn ChannelOutbound> {
+        FeishuPlugin::shared_outbound(self)
+    }
+
+    fn shared_stream_outbound(&self) -> Arc<dyn ChannelStreamOutbound> {
+        FeishuPlugin::shared_stream_outbound(self)
+    }
+
+    fn account_config_json(&self, account_id: &str) -> Option<serde_json::Value> {
+        FeishuPlugin::account_config(self, account_id)
     }
 }
 

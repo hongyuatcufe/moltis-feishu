@@ -18,14 +18,20 @@
 # Features
 
 - [LLM Providers](providers.md)
+  - [Anthropic OAuth (FAQ)](anthropic-oauth.md)
 - [MCP Servers](mcp.md)
 - [Memory](memory.md)
   - [Moltis vs OpenClaw](memory-comparison.md)
 - [Hooks](hooks.md)
 - [Local LLMs](local-llm.md)
 - [Sandbox](sandbox.md)
+  - [Trusted Network](trusted-network.md)
 - [Voice](voice.md)
-- [WhatsApp](whatsapp.md)
+- [Channels](channels.md)
+  - [Telegram](telegram.md)
+  - [Discord](discord.md)
+  - [Slack](slack.md)
+  - [WhatsApp](whatsapp.md)
 - [Browser Automation](browser-automation.md)
 - [CalDAV (Calendars)](caldav.md)
 - [GraphQL API](graphql.md)
@@ -37,6 +43,8 @@
 - [Native Swift Embedding (POC)](native-swift-embedding.md)
 - [macOS App FFI Bridge (WIP)](macos-app-ffi-bridge.md)
 - [OpenClaw Import](openclaw-import.md)
+- [Multi-Node](nodes.md)
+- [Service Management](service.md)
 
 ---
 
@@ -63,6 +71,8 @@
 - [SQLite Migrations](sqlite-migration.md)
 - [Metrics & Tracing](metrics-and-tracing.md)
 - [Tool Registry](tool-registry.md)
+- [Agent Presets](agent-presets.md)
+- [Session Tools](session-tools.md)
 
 ---
 

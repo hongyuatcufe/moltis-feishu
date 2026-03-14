@@ -10,6 +10,8 @@ use {async_trait::async_trait, serde_json::Value, tracing::warn};
 pub enum ServiceError {
     #[error("{message}")]
     Message { message: String },
+    #[error("{message}")]
+    Forbidden { message: String },
     #[error("{0}")]
     Serde(#[from] serde_json::Error),
 }
@@ -18,6 +20,13 @@ impl ServiceError {
     #[must_use]
     pub fn message(message: impl std::fmt::Display) -> Self {
         Self::Message {
+            message: message.to_string(),
+        }
+    }
+
+    #[must_use]
+    pub fn forbidden(message: impl std::fmt::Display) -> Self {
+        Self::Forbidden {
             message: message.to_string(),
         }
     }
@@ -37,7 +46,11 @@ impl From<&str> for ServiceError {
 
 impl From<ServiceError> for moltis_protocol::ErrorShape {
     fn from(err: ServiceError) -> Self {
-        Self::new(moltis_protocol::error_codes::UNAVAILABLE, err.to_string())
+        let code = match &err {
+            ServiceError::Forbidden { .. } => moltis_protocol::error_codes::FORBIDDEN,
+            _ => moltis_protocol::error_codes::UNAVAILABLE,
+        };
+        Self::new(code, err.to_string())
     }
 }
 
@@ -92,6 +105,7 @@ pub trait SessionService: Send + Sync {
     async fn search(&self, params: Value) -> ServiceResult;
     async fn fork(&self, params: Value) -> ServiceResult;
     async fn branches(&self, params: Value) -> ServiceResult;
+    async fn run_detail(&self, params: Value) -> ServiceResult;
     async fn clear_all(&self) -> ServiceResult;
     async fn mark_seen(&self, key: &str);
 }
@@ -154,6 +168,10 @@ impl SessionService for NoopSessionService {
 
     async fn branches(&self, _p: Value) -> ServiceResult {
         Ok(serde_json::json!([]))
+    }
+
+    async fn run_detail(&self, _p: Value) -> ServiceResult {
+        Ok(serde_json::json!({}))
     }
 
     async fn clear_all(&self) -> ServiceResult {
@@ -344,6 +362,11 @@ pub trait ChatService: Send + Sync {
     /// so the frontend can restore `voicePending` state after a page reload.
     async fn active_voice_pending(&self, _session_key: &str) -> bool {
         false
+    }
+    /// Return a snapshot of the current activity for a session: thinking text,
+    /// active tool calls, and whether the session is actively generating.
+    async fn peek(&self, _params: Value) -> ServiceResult {
+        Ok(serde_json::json!({ "active": false }))
     }
 }
 
@@ -682,6 +705,8 @@ impl SkillsService for NoopSkillsStub {
 #[async_trait]
 pub trait BrowserService: Send + Sync {
     async fn request(&self, params: Value) -> ServiceResult;
+    /// Initialize browser internals opportunistically after startup.
+    async fn warmup(&self) {}
     /// Clean up idle browser instances (called periodically).
     async fn cleanup_idle(&self) {}
     /// Shut down all browser instances (called on gateway exit).

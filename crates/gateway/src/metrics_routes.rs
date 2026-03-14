@@ -126,17 +126,18 @@ pub async fn api_metrics_summary_handler(State(state): State<AppState>) -> impl 
 
 /// Historical metrics data for time-series charts.
 ///
-/// Returns the last hour of metrics snapshots (sampled every 10 seconds)
+/// Returns metrics snapshots (sampled every 30 seconds)
 /// for rendering charts in the monitoring UI.
 #[cfg(feature = "metrics")]
 pub async fn api_metrics_history_handler(State(state): State<AppState>) -> impl IntoResponse {
     let inner = state.gateway.inner.read().await;
+    let max_points = inner.metrics_history.capacity();
     let points: Vec<_> = inner.metrics_history.iter().collect();
 
     Json(serde_json::json!({
         "enabled": true,
-        "interval_seconds": 10,
-        "max_points": 360,
+        "interval_seconds": 30,
+        "max_points": max_points,
         "points": points,
     }))
 }

@@ -83,7 +83,9 @@ async fn run_mcp_scan(installed_dir: &Path) -> anyhow::Result<Value> {
     Ok(parsed)
 }
 
-fn is_protected_discovered_skill(name: &str) -> bool {
+/// Returns `true` for discovered skill names that are protected and cannot be
+/// deleted from the UI (e.g. built-in template/tmux skills).
+pub fn is_protected_discovered_skill(name: &str) -> bool {
     matches!(name, "template-skill" | "template" | "tmux")
 }
 
@@ -940,9 +942,9 @@ fn delete_discovered_skill(source_type: &str, params: &Value) -> ServiceResult {
         .ok_or_else(|| "missing 'skill' parameter".to_string())?;
 
     if is_protected_discovered_skill(skill_name) {
-        return Err(
-            format!("skill '{skill_name}' is protected and cannot be deleted from the UI").into(),
-        );
+        return Err(ServiceError::forbidden(format!(
+            "skill '{skill_name}' is protected and cannot be deleted from the UI"
+        )));
     }
 
     if !moltis_skills::parse::validate_name(skill_name) {
@@ -1115,7 +1117,8 @@ fn set_skill_trusted(params: &Value, trusted: bool) -> ServiceResult {
 
 /// Real browser service using BrowserManager.
 pub struct RealBrowserService {
-    manager: moltis_browser::BrowserManager,
+    config: moltis_browser::BrowserConfig,
+    manager: tokio::sync::OnceCell<Arc<moltis_browser::BrowserManager>>,
 }
 
 impl RealBrowserService {
@@ -1123,7 +1126,8 @@ impl RealBrowserService {
         let mut browser_config = moltis_browser::BrowserConfig::from(config);
         browser_config.container_prefix = container_prefix;
         Self {
-            manager: moltis_browser::BrowserManager::new(browser_config),
+            config: browser_config,
+            manager: tokio::sync::OnceCell::new(),
         }
     }
 
@@ -1134,9 +1138,40 @@ impl RealBrowserService {
         if !config.tools.browser.enabled {
             return None;
         }
-        // Check if Chrome/Chromium is available and warn if not
-        moltis_browser::detect::check_and_warn(config.tools.browser.chrome_path.as_deref());
         Some(Self::new(&config.tools.browser, container_prefix))
+    }
+
+    async fn manager(&self) -> Arc<moltis_browser::BrowserManager> {
+        Arc::clone(
+            self.manager
+                .get_or_init(|| async {
+                    let config = self.config.clone();
+                    match tokio::task::spawn_blocking(move || {
+                        // Browser detection and stale-container cleanup can block;
+                        // run these off the async runtime worker threads.
+                        moltis_browser::detect::check_and_warn(config.chrome_path.as_deref());
+                        Arc::new(moltis_browser::BrowserManager::new(config))
+                    })
+                    .await
+                    {
+                        Ok(manager) => manager,
+                        Err(error) => {
+                            tracing::warn!(
+                                %error,
+                                "browser warmup worker failed, falling back to inline initialization"
+                            );
+                            let config = self.config.clone();
+                            moltis_browser::detect::check_and_warn(config.chrome_path.as_deref());
+                            Arc::new(moltis_browser::BrowserManager::new(config))
+                        },
+                    }
+                })
+                .await,
+        )
+    }
+
+    fn manager_if_initialized(&self) -> Option<Arc<moltis_browser::BrowserManager>> {
+        self.manager.get().map(Arc::clone)
     }
 }
 
@@ -1146,21 +1181,37 @@ impl BrowserService for RealBrowserService {
         let request: moltis_browser::BrowserRequest =
             serde_json::from_value(params).map_err(|e| format!("invalid request: {e}"))?;
 
-        let response = self.manager.handle_request(request).await;
+        let manager = self.manager().await;
+        let response = manager.handle_request(request).await;
 
         Ok(serde_json::to_value(&response).map_err(|e| format!("serialization error: {e}"))?)
     }
 
+    async fn warmup(&self) {
+        let started = std::time::Instant::now();
+        let _ = self.manager().await;
+        tracing::debug!(
+            elapsed_ms = started.elapsed().as_millis(),
+            "browser service warmup complete"
+        );
+    }
+
     async fn cleanup_idle(&self) {
-        self.manager.cleanup_idle().await;
+        if let Some(manager) = self.manager_if_initialized() {
+            manager.cleanup_idle().await;
+        }
     }
 
     async fn shutdown(&self) {
-        self.manager.shutdown().await;
+        if let Some(manager) = self.manager_if_initialized() {
+            manager.shutdown().await;
+        }
     }
 
     async fn close_all(&self) {
-        self.manager.shutdown().await;
+        if let Some(manager) = self.manager_if_initialized() {
+            manager.shutdown().await;
+        }
     }
 }
 
@@ -1190,6 +1241,9 @@ pub struct GatewayServices {
     pub provider_setup: Arc<dyn ProviderSetupService>,
     pub project: Arc<dyn ProjectService>,
     pub local_llm: Arc<dyn LocalLlmService>,
+    pub network_audit: Arc<dyn crate::network_audit::NetworkAuditService>,
+    /// Optional channel registry for direct plugin access (thread context, etc.).
+    pub channel_registry: Option<Arc<moltis_channels::ChannelRegistry>>,
     /// Optional channel outbound for sending replies back to channels.
     channel_outbound: Option<Arc<dyn moltis_channels::ChannelOutbound>>,
     /// Optional channel stream outbound for edit-in-place channel streaming.
@@ -1198,14 +1252,16 @@ pub struct GatewayServices {
     pub session_metadata: Option<Arc<moltis_sessions::metadata::SqliteSessionMetadata>>,
     /// Optional session store for message-index lookups (e.g. deduplication).
     pub session_store: Option<Arc<moltis_sessions::store::SessionStore>>,
+    /// Optional per-session state store for ephemeral handoff/context packets.
+    pub session_state_store: Option<Arc<moltis_sessions::state_store::SessionStateStore>>,
     /// Optional session share store for immutable snapshot links.
     pub session_share_store: Option<Arc<crate::share_store::ShareStore>>,
     /// Optional global attachment blob store (deduplicated + indexed).
     pub attachment_store: Option<Arc<crate::attachment_store::AttachmentStore>>,
     /// Optional agent persona store for multi-agent support.
     pub agent_persona_store: Option<Arc<crate::agent_persona::AgentPersonaStore>>,
-    /// Optional per-session state store for ephemeral handoff/context packets.
-    pub session_state_store: Option<Arc<moltis_sessions::state_store::SessionStateStore>>,
+    /// Shared agents config (presets) for spawn_agent and RPC sync.
+    pub agents_config: Option<Arc<tokio::sync::RwLock<moltis_config::AgentsConfig>>>,
 }
 
 impl GatewayServices {
@@ -1226,6 +1282,14 @@ impl GatewayServices {
 
     pub fn with_provider_setup(mut self, ps: Arc<dyn ProviderSetupService>) -> Self {
         self.provider_setup = ps;
+        self
+    }
+
+    pub fn with_channel_registry(
+        mut self,
+        registry: Arc<moltis_channels::ChannelRegistry>,
+    ) -> Self {
+        self.channel_registry = Some(registry);
         self
     }
 
@@ -1280,19 +1344,30 @@ impl GatewayServices {
             provider_setup: Arc::new(NoopProviderSetupService),
             project: Arc::new(NoopProjectService),
             local_llm: Arc::new(NoopLocalLlmService),
+            network_audit: Arc::new(crate::network_audit::NoopNetworkAuditService),
+            channel_registry: None,
             channel_outbound: None,
             channel_stream_outbound: None,
             session_metadata: None,
             session_store: None,
+            session_state_store: None,
             session_share_store: None,
             attachment_store: None,
             agent_persona_store: None,
-            session_state_store: None,
+            agents_config: None,
         }
     }
 
     pub fn with_local_llm(mut self, local_llm: Arc<dyn LocalLlmService>) -> Self {
         self.local_llm = local_llm;
+        self
+    }
+
+    pub fn with_network_audit(
+        mut self,
+        svc: Arc<dyn crate::network_audit::NetworkAuditService>,
+    ) -> Self {
+        self.network_audit = svc;
         self
     }
 
@@ -1319,6 +1394,14 @@ impl GatewayServices {
         self
     }
 
+    pub fn with_session_state_store(
+        mut self,
+        store: Arc<moltis_sessions::state_store::SessionStateStore>,
+    ) -> Self {
+        self.session_state_store = Some(store);
+        self
+    }
+
     pub fn with_session_share_store(mut self, store: Arc<crate::share_store::ShareStore>) -> Self {
         self.session_share_store = Some(store);
         self
@@ -1340,11 +1423,11 @@ impl GatewayServices {
         self
     }
 
-    pub fn with_session_state_store(
+    pub fn with_agents_config(
         mut self,
-        store: Arc<moltis_sessions::state_store::SessionStateStore>,
+        agents_config: Arc<tokio::sync::RwLock<moltis_config::AgentsConfig>>,
     ) -> Self {
-        self.session_state_store = Some(store);
+        self.agents_config = Some(agents_config);
         self
     }
 

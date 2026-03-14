@@ -1,4 +1,4 @@
-const { expect, test } = require("@playwright/test");
+const { expect, test } = require("../base-test");
 const { expectPageContentMounted, navigateAndWait, waitForWsConnected, watchPageErrors } = require("../helpers");
 
 async function spoofSafari(page) {
@@ -31,10 +31,71 @@ function graphqlHttpStatus(page) {
 }
 
 test.describe("Settings navigation", () => {
+	async function openProvidersPage(page) {
+		await navigateAndWait(page, "/settings/providers");
+		await expect.poll(() => new URL(page.url()).pathname).toBe("/settings/providers");
+		await expect(page.locator("#providersTitle")).toBeVisible();
+	}
+
 	test("/settings redirects to /settings/identity", async ({ page }) => {
 		await navigateAndWait(page, "/settings");
 		await expect(page).toHaveURL(/\/settings\/identity$/);
 		await expect(page.getByRole("heading", { name: "Identity", exact: true })).toBeVisible();
+	});
+
+	test("settings nav keeps distinct icons for nodes, tailscale, network audit, and openclaw import", async ({
+		page,
+	}) => {
+		const pageErrors = watchPageErrors(page);
+		await navigateAndWait(page, "/settings/identity");
+		await expect(page.locator(".settings-sidebar-nav")).toBeVisible();
+
+		const masks = await page.evaluate(() => {
+			const readRuleMask = (selector) => {
+				for (const sheet of Array.from(document.styleSheets || [])) {
+					let rules;
+					try {
+						rules = sheet.cssRules;
+					} catch {
+						continue;
+					}
+					if (!rules) continue;
+					for (const rule of Array.from(rules)) {
+						if (rule.type !== CSSRule.STYLE_RULE || rule.selectorText !== selector) continue;
+						return rule.style.getPropertyValue("-webkit-mask-image") || rule.style.getPropertyValue("mask-image") || "";
+					}
+				}
+				return null;
+			};
+			return {
+				nodes: readRuleMask('.settings-nav-item[data-section="nodes"]::before'),
+				tailscale: readRuleMask('.settings-nav-item[data-section="tailscale"]::before'),
+				networkAudit: readRuleMask('.settings-nav-item[data-section="network-audit"]::before'),
+				mcp: readRuleMask('.settings-nav-item[data-section="mcp"]::before'),
+				openclawImport: readRuleMask('.settings-nav-item[data-section="import"]::before'),
+			};
+		});
+
+		const hasMask = (value) => {
+			if (typeof value !== "string") return false;
+			const normalized = value.trim().toLowerCase();
+			return normalized !== "" && normalized !== "none";
+		};
+		if (masks.nodes !== null) {
+			expect(hasMask(masks.nodes)).toBeTruthy();
+		}
+		expect(hasMask(masks.tailscale)).toBeTruthy();
+		expect(hasMask(masks.networkAudit)).toBeTruthy();
+		expect(hasMask(masks.mcp)).toBeTruthy();
+		expect(masks.tailscale).not.toBe(masks.networkAudit);
+
+		// Import appears only when OpenClaw is detected in this run.
+		if (masks.openclawImport !== null) {
+			expect(hasMask(masks.openclawImport)).toBeTruthy();
+			expect(masks.openclawImport).not.toBe(masks.mcp);
+		}
+
+		expect(pageErrors).toEqual([]);
 	});
 
 	const settingsSections = [
@@ -45,6 +106,7 @@ test.describe("Settings navigation", () => {
 		{ id: "voice", heading: "Voice" },
 		{ id: "security", heading: "Security" },
 		{ id: "tailscale", heading: "Tailscale" },
+		{ id: "network-audit", heading: "Network Audit" },
 		{ id: "notifications", heading: "Notifications" },
 		{ id: "providers", heading: "LLMs" },
 		{ id: "channels", heading: "Channels" },
@@ -124,16 +186,15 @@ test.describe("Settings navigation", () => {
 			var options = ["🦊", "🐙", "🤖", "🐶"];
 			return options.find((emoji) => emoji !== current) || "🦊";
 		});
+		const iconHrefBefore = await page.evaluate(() => document.querySelector('link[rel="icon"]')?.href || "");
 		await page.getByRole("button", { name: selectedEmoji, exact: true }).click();
 		await expect(page.getByText("Saved", { exact: true })).toBeVisible();
 		await expect
 			.poll(() =>
-				page.evaluate((value) => {
+				page.evaluate((beforeHref) => {
 					var href = document.querySelector('link[rel="icon"]')?.href || "";
-					if (!href.startsWith("data:image/svg+xml,")) return false;
-					var decoded = decodeURIComponent(href.slice("data:image/svg+xml,".length));
-					return decoded.includes(value);
-				}, selectedEmoji),
+					return href.startsWith("data:image/png") && href !== beforeHref;
+				}, iconHrefBefore),
 			)
 			.toBeTruthy();
 		await expect(
@@ -215,8 +276,7 @@ test.describe("Settings navigation", () => {
 	});
 
 	test("provider page renders from settings", async ({ page }) => {
-		await navigateAndWait(page, "/settings/providers");
-		await expect(page.getByRole("heading", { name: "LLMs" })).toBeVisible();
+		await openProvidersPage(page);
 	});
 
 	test("terminal page renders from settings", async ({ page }) => {
@@ -306,6 +366,7 @@ test.describe("Settings navigation", () => {
 		const expectedPrefix = [
 			"Identity",
 			"Agents",
+			"Nodes",
 			"Environment",
 			"Memory",
 			"Notifications",
@@ -314,7 +375,7 @@ test.describe("Settings navigation", () => {
 			"Authentication",
 		];
 		if (navItems.includes("Encryption")) expectedPrefix.push("Encryption");
-		expectedPrefix.push("Tailscale", "Sandboxes", "Channels", "Hooks", "LLMs", "MCP", "Skills");
+		expectedPrefix.push("Tailscale", "Network Audit", "Sandboxes", "Channels", "Hooks", "LLMs", "MCP", "Skills");
 		const expectedSystem = ["Terminal", "Monitoring", "Logs"];
 		const expected = [...expectedPrefix];
 		if (navItems.includes("OpenClaw Import")) expected.push("OpenClaw Import");
@@ -324,23 +385,13 @@ test.describe("Settings navigation", () => {
 		expected.push("Configuration");
 		expect(navItems).toEqual(expected);
 
-		const llmsNavItem = page.locator(".settings-nav-item", { hasText: "LLMs" });
-		await expect(llmsNavItem.locator(".icon-layers")).toHaveCount(1);
-		await expect(llmsNavItem.locator(".icon-server")).toHaveCount(0);
-
-		const logsNavItem = page.locator(".settings-nav-item", { hasText: "Logs" });
-		await expect(logsNavItem.locator(".icon-document")).toHaveCount(1);
-
-		const terminalNavItem = page.locator(".settings-nav-item", { hasText: "Terminal" });
-		await expect(terminalNavItem.locator(".icon-terminal")).toHaveCount(1);
-
-		const configNavItem = page.locator(".settings-nav-item", { hasText: "Configuration" });
-		await expect(configNavItem.locator(".icon-code")).toHaveCount(1);
-		await expect(configNavItem.locator(".icon-document")).toHaveCount(0);
+		await expect(page.locator('.settings-nav-item[data-section="providers"]')).toHaveText("LLMs");
+		await expect(page.locator('.settings-nav-item[data-section="logs"]')).toHaveText("Logs");
+		await expect(page.locator('.settings-nav-item[data-section="terminal"]')).toHaveText("Terminal");
+		await expect(page.locator('.settings-nav-item[data-section="config"]')).toHaveText("Configuration");
 
 		if (navItems.includes("GraphQL")) {
-			const graphQlNavItem = page.locator(".settings-nav-item", { hasText: "GraphQL" });
-			await expect(graphQlNavItem.locator(".icon-graphql")).toHaveCount(1);
+			await expect(page.locator('.settings-nav-item[data-section="graphql"]')).toHaveText("GraphQL");
 		}
 	});
 });

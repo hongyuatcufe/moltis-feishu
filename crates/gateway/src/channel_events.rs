@@ -135,6 +135,8 @@ fn is_channel_control_command_name(cmd: &str) -> bool {
             | "handoff"
             | "help"
             | "sh"
+            | "peek"
+            | "stop"
     )
 }
 
@@ -563,6 +565,30 @@ async fn maybe_apply_handoff_context(
     )
 }
 
+fn start_channel_typing_loop(
+    state: &Arc<GatewayState>,
+    reply_to: &ChannelReplyTarget,
+) -> Option<tokio::sync::oneshot::Sender<()>> {
+    let outbound = state.services.channel_outbound_arc()?;
+    let (done_tx, mut done_rx) = tokio::sync::oneshot::channel::<()>();
+    let account_id = reply_to.account_id.clone();
+    let chat_id = reply_to.chat_id.clone();
+
+    tokio::spawn(async move {
+        loop {
+            if let Err(e) = outbound.send_typing(&account_id, &chat_id).await {
+                debug!(account_id, chat_id, "typing indicator failed: {e}");
+            }
+            tokio::select! {
+                _ = tokio::time::sleep(std::time::Duration::from_secs(4)) => {},
+                _ = &mut done_rx => break,
+            }
+        }
+    });
+
+    Some(done_tx)
+}
+
 /// Broadcasts channel events over the gateway WebSocket.
 ///
 /// Uses a deferred `OnceCell` reference so the sink can be created before
@@ -619,6 +645,10 @@ impl ChannelEventSink for GatewayChannelEventSink {
         meta: ChannelMessageMeta,
     ) {
         if let Some(state) = self.state.get() {
+            // Start typing immediately so pre-run setup (session/model resolution)
+            // does not delay channel feedback.
+            let typing_done = start_channel_typing_loop(state, &reply_to);
+
             let session_key = if let Some(ref sm) = state.services.session_metadata {
                 resolve_inbound_channel_session(state, &reply_to, sm).await
             } else {
@@ -637,18 +667,18 @@ impl ChannelEventSink for GatewayChannelEventSink {
 
             // Broadcast a "chat" event so the web UI shows the user message
             // in real-time (like typing from the UI).
-            // Include messageIndex so the client can deduplicate against history.
-            let msg_index = if let Some(ref store) = state.services.session_store {
-                store.count(&session_key).await.unwrap_or(0)
-            } else {
-                0
-            };
+            //
+            // We intentionally omit `messageIndex` here: the broadcast fires
+            // *before* chat.send() persists the message, so store.count()
+            // would be stale.  Concurrent channel messages would get the same
+            // index, causing the client-side dedup to drop the second one.
+            // Without a messageIndex the client skips its dedup check and
+            // always renders the message.
             let payload = serde_json::json!({
                 "state": "channel_user",
                 "text": text,
                 "channel": &meta,
                 "sessionKey": &session_key,
-                "messageIndex": msg_index,
             });
             broadcast(state, "chat", payload, BroadcastOpts {
                 drop_if_slow: true,
@@ -714,6 +744,43 @@ impl ChannelEventSink for GatewayChannelEventSink {
             }
             }
 
+            // Channel platforms do not expose bot read receipts. Use inbound
+            // user activity as a heuristic and mark prior session history seen.
+            state.services.session.mark_seen(&session_key).await;
+
+            // If the message is a thread reply, fetch prior thread messages
+            // for context injection so the LLM sees the conversation history.
+            let thread_context = if let Some(ref thread_id) = reply_to.message_id
+                && let Some(ref reg) = state.services.channel_registry
+            {
+                match reg
+                    .fetch_thread_messages(&reply_to.account_id, &reply_to.chat_id, thread_id, 20)
+                    .await
+                {
+                    Ok(msgs) if !msgs.is_empty() => {
+                        let history: Vec<serde_json::Value> = msgs
+                            .iter()
+                            .map(|m| {
+                                serde_json::json!({
+                                    "role": if m.is_bot { "assistant" } else { "user" },
+                                    "text": m.text,
+                                    "sender_id": m.sender_id,
+                                    "timestamp": m.timestamp,
+                                })
+                            })
+                            .collect();
+                        Some(history)
+                    },
+                    Ok(_) => None,
+                    Err(e) => {
+                        debug!("failed to fetch thread context: {e}");
+                        None
+                    },
+                }
+            } else {
+                None
+            };
+
             let chat = state.chat().await;
             let mut params = serde_json::json!({
                 "text": effective_text,
@@ -723,6 +790,11 @@ impl ChannelEventSink for GatewayChannelEventSink {
                 // starts executing this message (after semaphore acquire).
                 "_channel_reply_target": &reply_to,
             });
+
+            // Attach thread context if available.
+            if let Some(thread_history) = thread_context {
+                params["_thread_context"] = serde_json::json!(thread_history);
+            }
             // Thread saved voice audio filename so chat.rs persists the audio path.
             if let Some(ref audio_filename) = meta.audio_filename {
                 params["_audio_filename"] = serde_json::json!(audio_filename);
@@ -801,57 +873,10 @@ impl ChannelEventSink for GatewayChannelEventSink {
                 }
             }
 
-            // Send a repeating "typing" indicator every 4s until chat.send()
-            // completes. Telegram's typing status expires after ~5s.
-            let send_result = if let Some(outbound) = state.services.channel_outbound_arc() {
-                let (done_tx, mut done_rx) = tokio::sync::oneshot::channel::<()>();
-                let account_id = reply_to.account_id.clone();
-                let chat_id = reply_to.chat_id.clone();
-                tokio::spawn(async move {
-                    debug!(
-                        account_id = account_id,
-                        chat_id = chat_id,
-                        "starting typing indicator loop"
-                    );
-                    loop {
-                        if let Err(e) = outbound.send_typing(&account_id, &chat_id).await {
-                            debug!(
-                                account_id = account_id,
-                                chat_id = chat_id,
-                                "typing indicator failed: {e}"
-                            );
-                        } else {
-                            debug!(
-                                account_id = account_id,
-                                chat_id = chat_id,
-                                "typing indicator sent"
-                            );
-                        }
-                        tokio::select! {
-                            _ = tokio::time::sleep(std::time::Duration::from_secs(4)) => {
-                                debug!(
-                                    account_id = account_id,
-                                    chat_id = chat_id,
-                                    "typing loop: 4s elapsed, sending again"
-                                );
-                            },
-                            _ = &mut done_rx => {
-                                debug!(
-                                    account_id = account_id,
-                                    chat_id = chat_id,
-                                    "typing loop: chat completed, stopping"
-                                );
-                                break;
-                            },
-                        }
-                    }
-                });
-                let result = chat.send(params).await;
+            let send_result = chat.send(params).await;
+            if let Some(done_tx) = typing_done {
                 let _ = done_tx.send(());
-                result
-            } else {
-                chat.send(params).await
-            };
+            }
 
             if let Err(e) = send_result {
                 error!("channel dispatch_to_chat failed: {e}");
@@ -1019,6 +1044,34 @@ impl ChannelEventSink for GatewayChannelEventSink {
         }
     }
 
+    async fn dispatch_interaction(
+        &self,
+        callback_data: &str,
+        reply_to: ChannelReplyTarget,
+    ) -> ChannelResult<String> {
+        // Map callback_data prefixes to slash-command text, following the same
+        // convention used by Telegram's handle_callback_query.
+        let cmd_text = if let Some(n) = callback_data.strip_prefix("sessions_switch:") {
+            format!("sessions {n}")
+        } else if let Some(n) = callback_data.strip_prefix("agent_switch:") {
+            format!("agent {n}")
+        } else if let Some(n) = callback_data.strip_prefix("model_switch:") {
+            format!("model {n}")
+        } else if let Some(val) = callback_data.strip_prefix("sandbox_toggle:") {
+            format!("sandbox {val}")
+        } else if let Some(n) = callback_data.strip_prefix("sandbox_image:") {
+            format!("sandbox image {n}")
+        } else if let Some(provider) = callback_data.strip_prefix("model_provider:") {
+            format!("model provider:{provider}")
+        } else {
+            return Err(ChannelError::invalid_input(format!(
+                "unknown interaction callback: {callback_data}"
+            )));
+        };
+
+        self.dispatch_command(&cmd_text, reply_to).await
+    }
+
     async fn update_location(
         &self,
         reply_to: &ChannelReplyTarget,
@@ -1071,6 +1124,60 @@ impl ChannelEventSink for GatewayChannelEventSink {
         false
     }
 
+    async fn resolve_pending_location(
+        &self,
+        reply_to: &ChannelReplyTarget,
+        latitude: f64,
+        longitude: f64,
+    ) -> bool {
+        let Some(state) = self.state.get() else {
+            warn!("resolve_pending_location: gateway not ready");
+            return false;
+        };
+
+        let session_key = if let Some(ref sm) = state.services.session_metadata {
+            resolve_channel_session(reply_to, sm).await
+        } else {
+            default_channel_session_key(reply_to)
+        };
+
+        // Only resolve if a pending tool-triggered location request exists.
+        let pending_key = format!("channel_location:{session_key}");
+        let pending = state
+            .inner
+            .write()
+            .await
+            .pending_invokes
+            .remove(&pending_key);
+        if let Some(invoke) = pending {
+            // Cache and persist only when we resolved an explicit request.
+            let geo = moltis_config::GeoLocation::now(latitude, longitude, None);
+            state.inner.write().await.cached_location = Some(geo.clone());
+
+            let mut user = moltis_config::load_user().unwrap_or_default();
+            user.location = Some(geo);
+            if let Err(e) = moltis_config::save_user(&user) {
+                warn!(error = %e, "failed to persist location to USER.md");
+            }
+
+            let result = serde_json::json!({
+                "location": {
+                    "latitude": latitude,
+                    "longitude": longitude,
+                    "accuracy": 0.0,
+                }
+            });
+            let _ = invoke.sender.send(result);
+            info!(
+                session_key,
+                "resolved pending channel location request from text input"
+            );
+            return true;
+        }
+
+        false
+    }
+
     async fn dispatch_to_chat_with_attachments(
         &self,
         text: &str,
@@ -1088,6 +1195,10 @@ impl ChannelEventSink for GatewayChannelEventSink {
             warn!("channel dispatch_to_chat_with_attachments: gateway not ready");
             return;
         };
+
+        // Start typing immediately so image preprocessing/session setup doesn't
+        // delay channel feedback.
+        let typing_done = start_channel_typing_loop(state, &reply_to);
 
         let session_key = if let Some(ref sm) = state.services.session_metadata {
             resolve_inbound_channel_session(state, &reply_to, sm).await
@@ -1210,21 +1321,14 @@ impl ChannelEventSink for GatewayChannelEventSink {
             "dispatching multimodal message to chat"
         );
 
-        // Broadcast a "chat" event so the web UI shows the user message
-        let msg_index = if let Some(ref store) = state.services.session_store {
-            store.count(&session_key).await.unwrap_or(0)
-        } else {
-            0
-        };
-
-        // For the broadcast, just show the text portion
         let placeholder = attachment_placeholder_text(image_count > 0, !skipped_types.is_empty());
+        // Broadcast a "chat" event so the web UI shows the user message.
+        // See the text-only dispatch above for why messageIndex is omitted.
         let payload = serde_json::json!({
             "state": "channel_user",
             "text": if text.is_empty() { placeholder } else { text },
             "channel": &meta,
             "sessionKey": &session_key,
-            "messageIndex": msg_index,
             "hasAttachments": true,
         });
         broadcast(state, "chat", payload, BroadcastOpts {
@@ -1287,6 +1391,10 @@ impl ChannelEventSink for GatewayChannelEventSink {
                     .await;
             }
         }
+
+        // Channel platforms do not expose bot read receipts. Use inbound
+        // user activity as a heuristic and mark prior session history seen.
+        state.services.session.mark_seen(&session_key).await;
 
         let chat = state.chat().await;
         let mut params = serde_json::json!({
@@ -1363,28 +1471,10 @@ impl ChannelEventSink for GatewayChannelEventSink {
             }
         }
 
-        // Send typing indicator and dispatch to chat
-        let send_result = if let Some(outbound) = state.services.channel_outbound_arc() {
-            let (done_tx, mut done_rx) = tokio::sync::oneshot::channel::<()>();
-            let account_id = reply_to.account_id.clone();
-            let chat_id = reply_to.chat_id.clone();
-            tokio::spawn(async move {
-                loop {
-                    if let Err(e) = outbound.send_typing(&account_id, &chat_id).await {
-                        debug!(account_id, chat_id, "typing indicator failed: {e}");
-                    }
-                    tokio::select! {
-                        _ = tokio::time::sleep(std::time::Duration::from_secs(4)) => {},
-                        _ = &mut done_rx => break,
-                    }
-                }
-            });
-            let result = chat.send(params).await;
+        let send_result = chat.send(params).await;
+        if let Some(done_tx) = typing_done {
             let _ = done_tx.send(());
-            result
-        } else {
-            chat.send(params).await
-        };
+        }
 
         if let Err(e) = send_result {
             error!("channel dispatch_to_chat_with_attachments failed: {e}");
@@ -2407,6 +2497,49 @@ impl ChannelEventSink for GatewayChannelEventSink {
                     )),
                 }
             },
+            "stop" => {
+                let params = serde_json::json!({ "sessionKey": session_key });
+                match chat.abort(params).await {
+                    Ok(res) => {
+                        let aborted = res
+                            .get("aborted")
+                            .and_then(|v| v.as_bool())
+                            .unwrap_or(false);
+                        if aborted {
+                            Ok("Stopped.".to_string())
+                        } else {
+                            Ok("Nothing to stop.".to_string())
+                        }
+                    },
+                    Err(e) => Err(ChannelError::external("abort", e)),
+                }
+            },
+            "peek" => {
+                let params = serde_json::json!({ "sessionKey": session_key });
+                match chat.peek(params).await {
+                    Ok(res) => {
+                        let active = res.get("active").and_then(|v| v.as_bool()).unwrap_or(false);
+                        if !active {
+                            return Ok("Idle — nothing running.".to_string());
+                        }
+                        let mut lines = Vec::new();
+                        if let Some(text) = res.get("thinkingText").and_then(|v| v.as_str()) {
+                            lines.push(format!("Thinking: {text}"));
+                        }
+                        if let Some(tools) = res.get("toolCalls").and_then(|v| v.as_array()) {
+                            for tc in tools {
+                                let name = tc.get("name").and_then(|v| v.as_str()).unwrap_or("?");
+                                lines.push(format!("  Running: {name}"));
+                            }
+                        }
+                        if lines.is_empty() {
+                            lines.push("Active (thinking…)".to_string());
+                        }
+                        Ok(lines.join("\n"))
+                    },
+                    Err(e) => Err(ChannelError::external("peek", e)),
+                }
+            },
             _ => Err(ChannelError::invalid_input(format!(
                 "unknown command: /{cmd}"
             ))),
@@ -3068,5 +3201,17 @@ mod tests {
         assert!(parse_sessions_command_args("archive").is_err());
         assert!(parse_sessions_command_args("unarchive 0").is_err());
         assert!(parse_sessions_command_args("2 extra").is_err());
+    }
+
+    #[test]
+    fn peek_and_stop_are_control_commands() {
+        assert!(is_channel_control_command_name("peek"));
+        assert!(is_channel_control_command_name("stop"));
+    }
+
+    #[test]
+    fn shell_mode_rewrite_skips_peek_and_stop() {
+        assert!(rewrite_for_shell_mode("/peek").is_none());
+        assert!(rewrite_for_shell_mode("/stop").is_none());
     }
 }

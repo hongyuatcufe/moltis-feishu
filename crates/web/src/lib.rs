@@ -33,6 +33,10 @@ pub fn web_routes() -> Router<AppState> {
     let api = add_feature_routes(api);
 
     Router::new()
+        .route(
+            "/api/public/identity",
+            get(gon::api_public_identity_handler),
+        )
         .route("/auth/callback", get(oauth::oauth_callback_handler))
         .route(
             "/share/{share_id}/og-image.svg",
@@ -41,6 +45,7 @@ pub fn web_routes() -> Router<AppState> {
         .route("/share/{share_id}", get(share::share_page_handler))
         .route("/onboarding", get(spa::onboarding_handler))
         .route("/login", get(spa::login_handler_page))
+        .route("/setup-required", get(spa::setup_required_handler))
         .route(
             "/assets/v/{version}/{*path}",
             get(assets::versioned_asset_handler),
@@ -139,6 +144,11 @@ fn build_api_routes() -> Router<AppState> {
         .route(
             "/api/restart",
             axum::routing::post(moltis_gateway::tools_routes::restart),
+        )
+        .route("/api/sessions", get(api::api_sessions_handler))
+        .route(
+            "/api/sessions/{session_key}/history",
+            get(api::api_session_history_handler),
         )
         .route(
             "/api/sessions/{session_key}/upload",

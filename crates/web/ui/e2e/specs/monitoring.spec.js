@@ -1,4 +1,4 @@
-const { expect, test } = require("@playwright/test");
+const { expect, test } = require("../base-test");
 const { navigateAndWait, watchPageErrors } = require("../helpers");
 
 test.describe("Monitoring dashboard", () => {
@@ -16,6 +16,11 @@ test.describe("Monitoring dashboard", () => {
 		// Monitoring page should have time range buttons or selector
 		const content = page.locator("#pageContent");
 		await expect(content).not.toBeEmpty();
+	});
+
+	test("overview shows process memory card", async ({ page }) => {
+		await navigateAndWait(page, "/monitoring");
+		await expect(page.getByText("Process Memory", { exact: true })).toBeVisible();
 	});
 
 	test("page has no JS errors", async ({ page }) => {

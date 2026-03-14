@@ -1,5 +1,5 @@
 const { defineConfig } = require("@playwright/test");
-const { execFileSync } = require("child_process");
+const { execFileSync } = require("node:child_process");
 
 function pickFreePort() {
 	return execFileSync(
@@ -12,18 +12,18 @@ function pickFreePort() {
 	).trim();
 }
 
-function resolvePort(envVar, usedPorts) {
+function resolvePort(envVar, usedPortSet) {
 	var configured = process.env[envVar];
 	if (configured && configured !== "0") {
-		usedPorts.add(configured);
+		usedPortSet.add(configured);
 		return configured;
 	}
 	var picked = pickFreePort();
-	while (usedPorts.has(picked)) {
+	while (usedPortSet.has(picked)) {
 		picked = pickFreePort();
 	}
 	process.env[envVar] = picked;
-	usedPorts.add(picked);
+	usedPortSet.add(picked);
 	return picked;
 }
 
@@ -37,10 +37,15 @@ const onboardingBaseURL = process.env.MOLTIS_E2E_ONBOARDING_BASE_URL || `http://
 const onboardingAuthPort = resolvePort("MOLTIS_E2E_ONBOARDING_AUTH_PORT", usedPorts);
 const onboardingAuthBaseURL = `http://127.0.0.1:${onboardingAuthPort}`;
 
+const oauthPort = resolvePort("MOLTIS_E2E_OAUTH_PORT", usedPorts);
+const oauthBaseURL = `http://127.0.0.1:${oauthPort}`;
 const onboardingAnthropicPort = resolvePort("MOLTIS_E2E_ONBOARDING_ANTHROPIC_PORT", usedPorts);
 const onboardingAnthropicBaseURL =
 	process.env.MOLTIS_E2E_ONBOARDING_ANTHROPIC_BASE_URL || `http://127.0.0.1:${onboardingAnthropicPort}`;
-
+// Reliability first: fresh local gateway instances by default avoid
+// hidden cross-run state leaks. Set MOLTIS_E2E_REUSE_SERVER=1 to trade
+// determinism for faster startup in ad-hoc local runs.
+const reuseExistingServer = !process.env.CI && process.env.MOLTIS_E2E_REUSE_SERVER === "1";
 module.exports = defineConfig({
 	testDir: "./e2e/specs",
 	timeout: 45_000,
@@ -54,6 +59,7 @@ module.exports = defineConfig({
 	reporter: process.env.CI ? [["github"], ["html", { open: "never" }]] : [["list"], ["html", { open: "never" }]],
 	use: {
 		baseURL: baseURL,
+		locale: "en-US",
 		trace: "retain-on-failure",
 		screenshot: "only-on-failure",
 		video: "retain-on-failure",
@@ -67,6 +73,7 @@ module.exports = defineConfig({
 				/onboarding-openai\.spec/,
 				/onboarding-auth\.spec/,
 				/onboarding-anthropic\.spec/,
+				/oauth\.spec/,
 			],
 		},
 		{
@@ -89,6 +96,13 @@ module.exports = defineConfig({
 			},
 		},
 		{
+			name: "oauth",
+			testMatch: /oauth\.spec/,
+			use: {
+				baseURL: oauthBaseURL,
+			},
+		},
+		{
 			name: "onboarding-anthropic",
 			testMatch: /onboarding-anthropic\.spec/,
 			use: {
@@ -101,7 +115,7 @@ module.exports = defineConfig({
 			command: "./e2e/start-gateway.sh",
 			cwd: __dirname,
 			url: `${baseURL}/health`,
-			reuseExistingServer: !process.env.CI,
+			reuseExistingServer: reuseExistingServer,
 			timeout: 300_000,
 			env: {
 				...process.env,
@@ -112,7 +126,7 @@ module.exports = defineConfig({
 			command: "./e2e/start-gateway-onboarding.sh",
 			cwd: __dirname,
 			url: `${onboardingBaseURL}/health`,
-			reuseExistingServer: !process.env.CI,
+			reuseExistingServer: reuseExistingServer,
 			timeout: 300_000,
 			env: {
 				...process.env,
@@ -123,7 +137,7 @@ module.exports = defineConfig({
 			command: "./e2e/start-gateway-onboarding-auth.sh",
 			cwd: __dirname,
 			url: `${onboardingAuthBaseURL}/health`,
-			reuseExistingServer: !process.env.CI,
+			reuseExistingServer: reuseExistingServer,
 			timeout: 300_000,
 			env: {
 				...process.env,
@@ -131,10 +145,21 @@ module.exports = defineConfig({
 			},
 		},
 		{
+			command: "./e2e/start-gateway-oauth.sh",
+			cwd: __dirname,
+			url: `${oauthBaseURL}/health`,
+			reuseExistingServer: reuseExistingServer,
+			timeout: 300_000,
+			env: {
+				...process.env,
+				MOLTIS_E2E_OAUTH_PORT: oauthPort,
+			},
+		},
+		{
 			command: "./e2e/start-gateway-onboarding-anthropic.sh",
 			cwd: __dirname,
 			url: `${onboardingAnthropicBaseURL}/health`,
-			reuseExistingServer: !process.env.CI,
+			reuseExistingServer: reuseExistingServer,
 			timeout: 300_000,
 			env: {
 				...process.env,
