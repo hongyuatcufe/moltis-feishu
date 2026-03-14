@@ -484,6 +484,7 @@ fn build_schema_map() -> KnownKeys {
                 ("http_request_logs", Leaf),
                 ("ws_request_logs", Leaf),
                 ("log_buffer_size", Leaf),
+                ("update_repository_url", Leaf),
                 ("update_releases_url", Leaf),
                 ("db_pool_max_connections", Leaf),
                 ("shiki_cdn_url", Leaf),
@@ -942,29 +943,39 @@ fn check_deprecated_fields(
     toml_value: &toml::Value,
     diagnostics: &mut Vec<Diagnostic>,
 ) -> Vec<&'static str> {
-    let Some(memory) = toml_value.get("memory").and_then(|value| value.as_table()) else {
-        return Vec::new();
-    };
-
     let mut conflicting_replacements = Vec::new();
-    if check_deprecated_memory_field(memory, "embedding_provider", "provider", diagnostics) {
-        conflicting_replacements.push("provider");
+    if let Some(server) = toml_value.get("server").and_then(|value| value.as_table())
+        && check_deprecated_table_field(
+            server,
+            "server",
+            "update_repository_url",
+            "update_releases_url",
+            diagnostics,
+        )
+    {
+        conflicting_replacements.push("update_releases_url");
     }
-    if check_deprecated_memory_field(memory, "embedding_base_url", "base_url", diagnostics) {
-        conflicting_replacements.push("base_url");
+
+    if let Some(memory) = toml_value.get("memory").and_then(|value| value.as_table()) {
+        if check_deprecated_memory_field(memory, "embedding_provider", "provider", diagnostics) {
+            conflicting_replacements.push("provider");
+        }
+        if check_deprecated_memory_field(memory, "embedding_base_url", "base_url", diagnostics) {
+            conflicting_replacements.push("base_url");
+        }
+        if check_deprecated_memory_field(memory, "embedding_model", "model", diagnostics) {
+            conflicting_replacements.push("model");
+        }
+        if check_deprecated_memory_field(memory, "embedding_api_key", "api_key", diagnostics) {
+            conflicting_replacements.push("api_key");
+        }
+        check_deprecated_ignored_memory_field(
+            memory,
+            "embedding_dimensions",
+            "deprecated field; ignored because embedding dimensions are determined by the provider response",
+            diagnostics,
+        );
     }
-    if check_deprecated_memory_field(memory, "embedding_model", "model", diagnostics) {
-        conflicting_replacements.push("model");
-    }
-    if check_deprecated_memory_field(memory, "embedding_api_key", "api_key", diagnostics) {
-        conflicting_replacements.push("api_key");
-    }
-    check_deprecated_ignored_memory_field(
-        memory,
-        "embedding_dimensions",
-        "deprecated field; ignored because embedding dimensions are determined by the provider response",
-        diagnostics,
-    );
     conflicting_replacements
 }
 
@@ -983,17 +994,27 @@ fn check_deprecated_memory_field(
     replacement: &str,
     diagnostics: &mut Vec<Diagnostic>,
 ) -> bool {
-    if !memory.contains_key(legacy) {
+    check_deprecated_table_field(memory, "memory", legacy, replacement, diagnostics)
+}
+
+fn check_deprecated_table_field(
+    table: &toml::map::Map<String, toml::Value>,
+    table_name: &str,
+    legacy: &str,
+    replacement: &str,
+    diagnostics: &mut Vec<Diagnostic>,
+) -> bool {
+    if !table.contains_key(legacy) {
         return false;
     }
 
-    if memory.contains_key(replacement) {
+    if table.contains_key(replacement) {
         diagnostics.push(Diagnostic {
             severity: Severity::Error,
             category: "deprecated-field",
-            path: format!("memory.{legacy}"),
+            path: format!("{table_name}.{legacy}"),
             message: format!(
-                "deprecated field conflicts with \"memory.{replacement}\"; remove \"memory.{legacy}\""
+                "deprecated field conflicts with \"{table_name}.{replacement}\"; remove \"{table_name}.{legacy}\""
             ),
         });
         return true;
@@ -1002,8 +1023,10 @@ fn check_deprecated_memory_field(
     diagnostics.push(Diagnostic {
         severity: Severity::Warning,
         category: "deprecated-field",
-        path: format!("memory.{legacy}"),
-        message: format!("deprecated field; use \"memory.{replacement}\" instead"),
+        path: format!("{table_name}.{legacy}"),
+        message: format!(
+            "deprecated field; use \"{table_name}.{replacement}\" instead"
+        ),
     });
     false
 }
@@ -1641,6 +1664,33 @@ bnd = "0.0.0.0"
             result.diagnostics
         );
         assert!(unknown.unwrap().message.contains("bind"));
+    }
+
+    #[test]
+    fn deprecated_server_update_repository_url_warned_not_unknown() {
+        let toml = r#"
+[server]
+update_repository_url = "https://example.com/releases.json"
+"#;
+        let result = validate_toml_str(toml);
+        let deprecated = result
+            .diagnostics
+            .iter()
+            .find(|d| d.category == "deprecated-field" && d.path == "server.update_repository_url");
+        assert!(
+            deprecated.is_some(),
+            "expected deprecated-field for legacy server.update_repository_url, got: {:?}",
+            result.diagnostics
+        );
+        assert_eq!(deprecated.map(|d| d.severity), Some(Severity::Warning));
+        assert!(
+            result
+                .diagnostics
+                .iter()
+                .all(|d| !(d.category == "unknown-field" && d.path == "server.update_repository_url")),
+            "legacy field should not be reported as unknown: {:?}",
+            result.diagnostics
+        );
     }
 
     #[test]

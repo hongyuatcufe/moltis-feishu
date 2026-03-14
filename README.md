@@ -53,21 +53,23 @@ This repository is a custom `moltis` fork focused on Feishu integration, Chinese
 
 ## Install From This Branch / 从本分支安装
 
-### Option 1: Clone And Build / 方式 1：克隆源码构建
+### Recommended: Clone And Build / 推荐：克隆源码构建
 
 ```bash
 git clone https://github.com/hongyuatcufe/moltis-feishu.git
 cd moltis-feishu
 git checkout feat/feishu-cn-tools-release
+cd crates/web/ui
+./build.sh
+cd ../../..
 cargo build --release
 ./target/release/moltis
 ```
 
-### Option 2: Cargo Install From Git / 方式 2：直接用 cargo 安装分支
+说明：
 
-```bash
-cargo install --git https://github.com/hongyuatcufe/moltis-feishu.git --branch feat/feishu-cn-tools-release moltis
-```
+- 首次源码构建前需要先生成 Web UI 资源 `crates/web/src/assets/style.css`
+- 因此当前分支不建议直接使用 `cargo install --git ...`
 
 安装后运行：
 
@@ -185,6 +187,10 @@ Suggested smoke checks:
 3. Verify `/agent writer` and `/handoff writer please continue`
 4. Confirm `web_cn_search` returns results when provider keys are valid
 5. Confirm `web_read` can read a target URL
+
+如果 `config check` 报本地旧配置字段错误，请先清理已废弃字段，再重新检查。
+
+If `config check` reports unknown fields from an older local config, remove the stale fields and run it again.
 
 ## Security / 安全说明
 

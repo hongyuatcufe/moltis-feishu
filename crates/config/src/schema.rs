@@ -800,6 +800,8 @@ pub struct ServerConfig {
     /// URL of the releases manifest (`releases.json`) used by the update checker.
     ///
     /// Defaults to `https://www.moltis.org/releases.json` when unset.
+    /// Accepts legacy `update_repository_url` for backward compatibility.
+    #[serde(alias = "update_repository_url")]
     pub update_releases_url: Option<String>,
     /// Maximum number of SQLite pool connections. Lower values reduce memory
     /// usage for personal gateways. Defaults to 5.
@@ -2937,6 +2939,19 @@ tool_mode = "native"
         assert_eq!(
             config.providers.get("anthropic").unwrap().tool_mode,
             ToolMode::Native
+        );
+    }
+
+    #[test]
+    fn server_config_parses_legacy_update_repository_url_alias() {
+        let toml = r#"
+[server]
+update_repository_url = "https://example.com/releases.json"
+"#;
+        let config: MoltisConfig = toml::from_str(toml).unwrap();
+        assert_eq!(
+            config.server.update_releases_url.as_deref(),
+            Some("https://example.com/releases.json")
         );
     }
 }
