@@ -1041,14 +1041,26 @@ impl LiveSessionService {
                 .set_memory_owner_agent_id(key, Some(&effective_agent))
                 .await;
         }
+        let effective_memory_owner = entry
+            .memory_owner_agent_id
+            .as_deref()
+            .map(str::trim)
+            .filter(|id| !id.is_empty())
+            .map(ToOwned::to_owned)
+            .unwrap_or_else(|| effective_agent.clone());
         if entry
             .agent_mode
             .as_deref()
             .is_none_or(|value| value.trim().is_empty())
         {
+            let fallback_mode = if effective_agent == effective_memory_owner {
+                AGENT_MODE_ATTACHED
+            } else {
+                AGENT_MODE_EPHEMERAL
+            };
             let _ = self
                 .metadata
-                .set_agent_mode(key, Some(AGENT_MODE_ATTACHED))
+                .set_agent_mode(key, Some(fallback_mode))
                 .await;
         }
         self.metadata.get(key).await
@@ -2746,6 +2758,77 @@ mod tests {
 
         let result = svc.clear_all().await;
         assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn resolve_backfills_missing_agent_mode_as_ephemeral_when_memory_owner_differs() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Arc::new(SessionStore::new(dir.path().to_path_buf()));
+        let pool = sqlite_pool().await;
+        let metadata = Arc::new(SqliteSessionMetadata::new(pool));
+        metadata
+            .upsert("legacy-session", Some("Legacy".to_string()))
+            .await
+            .unwrap();
+        metadata
+            .set_agent_id("legacy-session", Some("writer"))
+            .await
+            .unwrap();
+        metadata
+            .set_memory_owner_agent_id("legacy-session", Some("main"))
+            .await
+            .unwrap();
+        metadata.set_agent_mode("legacy-session", None).await.unwrap();
+
+        let svc = LiveSessionService::new(store, Arc::clone(&metadata));
+        let resolved = svc
+            .resolve(serde_json::json!({ "key": "legacy-session" }))
+            .await
+            .expect("resolve legacy session");
+        let entry_json = &resolved["entry"];
+
+        assert_eq!(entry_json["agentId"].as_str(), Some("writer"));
+        assert_eq!(entry_json["memoryOwnerAgentId"].as_str(), Some("main"));
+        assert_eq!(entry_json["agentMode"].as_str(), Some(AGENT_MODE_EPHEMERAL));
+
+        let entry = metadata.get("legacy-session").await.expect("entry");
+        assert_eq!(entry.agent_mode.as_deref(), Some(AGENT_MODE_EPHEMERAL));
+    }
+
+    #[tokio::test]
+    async fn resolve_backfills_missing_memory_owner_from_active_agent() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Arc::new(SessionStore::new(dir.path().to_path_buf()));
+        let pool = sqlite_pool().await;
+        let metadata = Arc::new(SqliteSessionMetadata::new(pool));
+        metadata
+            .upsert("legacy-session", Some("Legacy".to_string()))
+            .await
+            .unwrap();
+        metadata
+            .set_agent_id("legacy-session", Some("writer"))
+            .await
+            .unwrap();
+        metadata
+            .set_memory_owner_agent_id("legacy-session", None)
+            .await
+            .unwrap();
+        metadata.set_agent_mode("legacy-session", None).await.unwrap();
+
+        let svc = LiveSessionService::new(store, Arc::clone(&metadata));
+        let resolved = svc
+            .resolve(serde_json::json!({ "key": "legacy-session" }))
+            .await
+            .expect("resolve legacy session");
+        let entry_json = &resolved["entry"];
+
+        assert_eq!(entry_json["agentId"].as_str(), Some("writer"));
+        assert_eq!(entry_json["memoryOwnerAgentId"].as_str(), Some("writer"));
+        assert_eq!(entry_json["agentMode"].as_str(), Some(AGENT_MODE_ATTACHED));
+
+        let entry = metadata.get("legacy-session").await.expect("entry");
+        assert_eq!(entry.memory_owner_agent_id.as_deref(), Some("writer"));
+        assert_eq!(entry.agent_mode.as_deref(), Some(AGENT_MODE_ATTACHED));
     }
 
     #[tokio::test]

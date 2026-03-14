@@ -249,28 +249,9 @@ const DEFAULT_AUTO_ARCHIVE_DAYS: u64 = 30;
 const AGENT_MODE_ATTACHED: &str = "attached";
 const AGENT_MODE_EPHEMERAL: &str = "ephemeral";
 
-#[derive(Debug, Clone, Copy, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case")]
-enum HandoffMode {
-    SameSession,
-    NewSession,
-    ForkSession,
-}
-
-impl HandoffMode {
-    fn as_str(self) -> &'static str {
-        match self {
-            Self::SameSession => "same_session",
-            Self::NewSession => "new_session",
-            Self::ForkSession => "fork_session",
-        }
-    }
-}
-
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 struct HandoffPacket {
     version: u8,
-    mode: HandoffMode,
     from_agent_id: String,
     to_agent_id: String,
     source_session_key: String,
@@ -562,7 +543,6 @@ async fn maybe_apply_handoff_context(
         "[Internal Handoff Context]".to_string(),
         format!("from_agent: {}", packet.from_agent_id),
         format!("to_agent: {}", packet.to_agent_id),
-        format!("mode: {}", packet.mode.as_str()),
     ];
     if !packet.note.trim().is_empty() {
         prefix.push(format!("note: {}", packet.note.trim()));
@@ -1887,16 +1867,26 @@ impl ChannelEventSink for GatewayChannelEventSink {
                     Ok(lines.join("\n"))
                 } else {
                     let chosen = resolve_agent_selector(&agents, args)?;
+                    let current_entry = session_metadata.get(&session_key).await;
+                    let memory_owner = current_entry
+                        .as_ref()
+                        .and_then(|entry| entry.memory_owner_agent_id.as_deref())
+                        .map(str::trim)
+                        .filter(|value| !value.is_empty())
+                        .map(ToOwned::to_owned)
+                        .or_else(|| {
+                            current_entry
+                                .as_ref()
+                                .and_then(|entry| entry.agent_id.as_deref())
+                                .map(str::trim)
+                                .filter(|value| !value.is_empty())
+                                .map(ToOwned::to_owned)
+                        })
+                        .unwrap_or(default_id.clone());
                     session_metadata
                         .set_agent_id(&session_key, Some(&chosen.id))
                         .await
                         .map_err(|e| ChannelError::external("setting session agent", e))?;
-                    let memory_owner = session_metadata
-                        .get(&session_key)
-                        .await
-                        .and_then(|entry| entry.memory_owner_agent_id)
-                        .filter(|value| !value.trim().is_empty())
-                        .unwrap_or(default_id.clone());
                     session_metadata
                         .set_memory_owner_agent_id(&session_key, Some(&memory_owner))
                         .await
@@ -1994,7 +1984,6 @@ impl ChannelEventSink for GatewayChannelEventSink {
                 let (selector, note) = parse_handoff_args(args)?;
                 let chosen = resolve_agent_selector(&agents, &selector)?;
                 let source_session_key = session_key.clone();
-                let mode = HandoffMode::NewSession;
                 let new_key = format!("session:{}", uuid::Uuid::new_v4());
                 let binding_json = serde_json::to_string(&reply_to)
                     .map_err(|e| ChannelError::external("serialize channel binding", e))?;
@@ -2074,7 +2063,6 @@ impl ChannelEventSink for GatewayChannelEventSink {
                 if let Some(ref state_store) = state.services.session_state_store {
                     let packet = HandoffPacket {
                         version: 1,
-                        mode,
                         from_agent_id: current_agent.clone(),
                         to_agent_id: chosen.id.clone(),
                         source_session_key: source_session_key.clone(),
@@ -2099,10 +2087,9 @@ impl ChannelEventSink for GatewayChannelEventSink {
                     format!("\nNote: {note}")
                 };
                 Ok(format!(
-                    "Handoff to {} [{}] via {}. Session: {}{}",
+                    "Handoff to {} [{}]. Session: {}{}",
                     chosen.name,
                     chosen.id,
-                    mode.as_str(),
                     target_session_key,
                     note_suffix
                 ))
@@ -2905,6 +2892,27 @@ mod tests {
         assert_eq!(note2, "");
     }
 
+    #[test]
+    fn handoff_packet_deserializes_legacy_mode_field() {
+        let packet: HandoffPacket = serde_json::from_value(serde_json::json!({
+            "version": 1,
+            "mode": "new_session",
+            "from_agent_id": "main",
+            "to_agent_id": "writer",
+            "source_session_key": "session:source",
+            "target_session_key": "session:target",
+            "note": "continue",
+            "summary": "User asked: draft it",
+            "created_at_ms": 123,
+        }))
+        .unwrap();
+
+        assert_eq!(packet.from_agent_id, "main");
+        assert_eq!(packet.to_agent_id, "writer");
+        assert_eq!(packet.note, "continue");
+        assert_eq!(packet.summary, "User asked: draft it");
+    }
+
     #[tokio::test]
     async fn agent_command_updates_current_session_only() {
         let (sink, _state, metadata, _state_store, _session_store, _agent_store, reply_to) =
@@ -2932,6 +2940,33 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn agent_command_preserves_legacy_attached_owner_when_memory_owner_is_missing() {
+        let (sink, _state, metadata, _state_store, _session_store, _agent_store, reply_to) =
+            test_command_sink().await;
+        let session_key = default_channel_session_key(&reply_to);
+        metadata
+            .set_agent_id(&session_key, Some("writer"))
+            .await
+            .unwrap();
+        metadata
+            .set_memory_owner_agent_id(&session_key, None)
+            .await
+            .unwrap();
+        metadata.set_agent_mode(&session_key, None).await.unwrap();
+
+        let response = sink.dispatch_command("agent main", reply_to.clone()).await.unwrap();
+
+        assert_eq!(
+            response,
+            "Agent switched to: 🤖 bob (temporary persona, session memory unchanged)"
+        );
+        let session = metadata.get(&session_key).await.unwrap();
+        assert_eq!(session.agent_id.as_deref(), Some("main"));
+        assert_eq!(session.memory_owner_agent_id.as_deref(), Some("writer"));
+        assert_eq!(session.agent_mode.as_deref(), Some(AGENT_MODE_EPHEMERAL));
+    }
+
+    #[tokio::test]
     async fn handoff_new_session_creates_isolated_session_and_one_shot_context() {
         let (sink, state, metadata, state_store, session_store, _agent_store, reply_to) =
             test_command_sink().await;
@@ -2956,7 +2991,7 @@ mod tests {
             .await
             .unwrap();
 
-        assert!(response.contains("Handoff to Writer [writer] via new_session."));
+        assert!(response.contains("Handoff to Writer [writer]."));
         let target_session_key = metadata
             .get_active_session(
                 reply_to.channel_type.as_str(),
@@ -2990,7 +3025,6 @@ mod tests {
         assert!(first_message.contains("[Internal Handoff Context]"));
         assert!(first_message.contains("from_agent: main"));
         assert!(first_message.contains("to_agent: writer"));
-        assert!(first_message.contains("mode: new_session"));
         assert!(first_message.contains("note: continue as Alice"));
         assert!(first_message.contains("summary:"));
         assert!(first_message.contains("User asked: Please draft a launch post."));
