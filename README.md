@@ -1,20 +1,59 @@
 # Moltis Feishu Fork
 
-本仓库是基于 `moltis v0.9.10` 的定制分支，面向飞书与中文检索场景。
+这个仓库是 `moltis` 的定制分支，面向飞书接入、中文检索和多 Agent 会话协作。
+
+This repository is a custom `moltis` fork focused on Feishu integration, Chinese web search, and multi-agent session workflows.
+
+## Upstream Base / 上游基线
+
+- 基于 `moltis` 上游代码。
+- 已合入 `v0.10.18` 及之后的部分 `upstream/main` 更新。
+- 当前工作分支：`feat/feishu-cn-tools-release`
+
+- Based on upstream `moltis`.
+- Includes `v0.10.18` and later updates merged from `upstream/main`.
+- Active branch: `feat/feishu-cn-tools-release`
 
 ## What This Fork Adds / 本分支新增能力
 
-- Feishu WebSocket 长连接接入（无 pairing）。
-- Feishu 收发文本、图片、文件、语音（入站 STT + 出站 TTS）。
-- 多 Agent 会话控制：`/agent`、`/handoff`、会话切换与继承模式。
-- 会话治理：`/sessions archive N`、`/sessions unarchive N`、自动归档。
-- `web_cn_search` 工具：统一封装 Metaso / Bocha / Anspire / Jina。
-- `web_read` 工具：Jina / Metaso / Crawl4AI / Pinchtab 回退链路。
-- 附件集中存储（blob）与 `original_name` 贯通。
+- 飞书 WebSocket 长连接接入，不需要 pairing。
+- Feishu WebSocket long-lived connection without pairing.
 
-## Install From This Fork / 从本分支安装
+- 飞书文本、图片、文件消息接入与发送。
+- Feishu text, image, and file messaging in both directions.
 
-### 方式 1：本地源码构建
+- Feishu 附件统一落盘到 `~/.moltis/attachments/blobs/`，并保留 `original_name`。
+- Feishu attachments are persisted under `~/.moltis/attachments/blobs/` with `original_name` preserved.
+
+- 多 Agent 会话切换：`/agent <id>`。
+- Multi-agent session switching: `/agent <id>`.
+
+- handoff 流程：`/handoff <id> [note]`，固定为“新建隔离 session + 摘要交接 + 首轮一次性消费”。
+- Handoff workflow: `/handoff <id> [note]`, always using “new isolated session + sanitized summary + one-shot first-turn context”.
+
+- 会话治理：`/sessions archive N`、`/sessions unarchive N`、`session_auto_archive_days` 自动归档。
+- Session management: `/sessions archive N`, `/sessions unarchive N`, and automatic archiving via `session_auto_archive_days`.
+
+- `web_cn_search` 工具：统一封装 Metaso、Bocha、Anspire、Jina。
+- `web_cn_search`: unified wrapper for Metaso, Bocha, Anspire, and Jina.
+
+- `web_read` 工具：Jina、Metaso、Crawl4AI、PinchTab 回退链路。
+- `web_read`: fallback chain across Jina, Metaso, Crawl4AI, and PinchTab.
+
+- provider 缺 key 或单项配置错误时按组件降级，不阻塞其他已配置 provider。
+- Missing API keys or invalid provider-specific config degrade per component instead of blocking the rest.
+
+## Current Status / 当前状态
+
+- `/agent` 和 `/handoff` 目前只接受 agent id，不再使用 alias 作为用户侧入口。
+- `/agent` and `/handoff` currently accept agent ids only; aliases are no longer the user-facing selector.
+
+- Feishu 出站语音回复链路已接入；入站飞书语音转写当前分支未启用。
+- Outbound Feishu voice replies are wired up; inbound Feishu voice transcription is not currently enabled on this branch.
+
+## Install From This Branch / 从本分支安装
+
+### Option 1: Clone And Build / 方式 1：克隆源码构建
 
 ```bash
 git clone https://github.com/hongyuatcufe/moltis-feishu.git
@@ -24,7 +63,7 @@ cargo build --release
 ./target/release/moltis
 ```
 
-### 方式 2：直接用 cargo 安装指定分支
+### Option 2: Cargo Install From Git / 方式 2：直接用 cargo 安装分支
 
 ```bash
 cargo install --git https://github.com/hongyuatcufe/moltis-feishu.git --branch feat/feishu-cn-tools-release moltis
@@ -32,50 +71,127 @@ cargo install --git https://github.com/hongyuatcufe/moltis-feishu.git --branch f
 
 安装后运行：
 
+After installation:
+
 ```bash
 moltis
 ```
 
 ## Config Example / 配置示例
 
-示例文件：`examples/moltis.feishu-cn-tools.example.toml`
+示例配置文件：
 
-建议操作：
+Example config file:
 
-- 复制示例到你的本地配置文件路径（例如 `~/.config/moltis/moltis.toml`）。
-- 仅替换你自己的密钥：`app_id`、`app_secret`、`METASO/BOCHA/ANSPIRE/JINA` 等 API Key。
-- 根据需要打开或关闭 provider：`enabled = true/false`。
+- `examples/moltis.feishu-cn-tools.example.toml`
 
-## Minimal Required Config / 最小必需配置
+推荐做法：
 
-- Feishu：
-- `channels.feishu.<account>.app_id`
-- `channels.feishu.<account>.app_secret`
+Recommended workflow:
 
-- `web_cn_search`（至少一个 provider 的 key）：
-- `tools.web.cn_search.metaso` 或 `bocha` 或 `anspire` 或 `jina`
+1. 复制 `examples/moltis.feishu-cn-tools.example.toml` 到 `~/.config/moltis/moltis.toml`
+2. 填入你自己的 Feishu 和搜索工具密钥
+3. 按需启用或关闭各 provider
 
-## Run & Verify / 启动与验证
+1. Copy `examples/moltis.feishu-cn-tools.example.toml` to `~/.config/moltis/moltis.toml`
+2. Fill in your Feishu and search-tool secrets
+3. Enable or disable providers as needed
 
-```bash
-cargo run --release
+## Minimal Config / 最小配置
+
+### Feishu
+
+```toml
+[channels.feishu.main-bot]
+app_id = "cli_xxxxxxxxxxxxx"
+app_secret = "xxxxxxxxxxxxxxxx"
+base_url = "https://open.feishu.cn"
+agent_id = "main"
+allow_agent_switch = true
+session_auto_archive_days = 30
 ```
 
-建议先做：
+### `web_cn_search`
+
+至少配置一个 provider：
+
+Configure at least one provider:
+
+```toml
+[tools.web.cn_search]
+enabled = true
+
+[tools.web.cn_search.bocha]
+enabled = true
+
+[[tools.web.cn_search.bocha.accounts]]
+name = "main"
+api_key = "YOUR_BOCHA_API_KEY"
+enabled = true
+```
+
+### `web_read`
+
+```toml
+[tools.web.read]
+enabled = true
+
+[tools.web.read.jina]
+enabled = true
+
+[[tools.web.read.jina.accounts]]
+name = "main"
+api_key = "YOUR_JINA_API_KEY"
+enabled = true
+```
+
+### Supported Environment Variables / 支持的环境变量
+
+- `METASO_API_KEY`
+- `BOCHA_API_KEY`
+- `ANSPIRE_API_KEY`
+- `JINA_API_KEY`
+
+## Startup And Verification / 启动与验证
+
+先检查配置：
+
+Validate config first:
 
 ```bash
 cargo run -- config check
 ```
 
-飞书里测试：
+然后启动：
 
-- 文本消息收发。
-- 上传文件后是否能生成附件保存路径提示。
-- 语音消息是否可转写。
-- `web_cn_search` 是否能返回检索结果。
+Then start the server:
 
-## Security Notes / 安全说明
+```bash
+cargo run --release
+```
 
-- 不要把真实密钥提交到 Git 仓库。
-- 不要提交你的本地配置文件（如 `~/.config/moltis/moltis.toml`）。
-- 只提交代码、迁移、README、example 配置。
+建议的回归检查：
+
+Suggested smoke checks:
+
+1. 飞书文本消息是否正常收发
+2. 飞书图片或文件上传后，是否出现本地附件路径提示
+3. `/agent writer` 和 `/handoff writer 请继续处理` 是否生效
+4. `web_cn_search` 是否能在 provider key 正确时返回结果
+5. `web_read` 是否能读取指定 URL
+
+1. Verify Feishu text messages work both ways
+2. Upload an image or file and confirm the local attachment path appears
+3. Verify `/agent writer` and `/handoff writer please continue`
+4. Confirm `web_cn_search` returns results when provider keys are valid
+5. Confirm `web_read` can read a target URL
+
+## Security / 安全说明
+
+- 不要提交真实密钥、令牌或本地配置文件。
+- 不要提交 `~/.config/moltis/moltis.toml` 或 `provider_keys.json`。
+- 只提交代码、迁移、README 和示例配置。
+
+- Do not commit real secrets, tokens, or local config files.
+- Do not commit `~/.config/moltis/moltis.toml` or `provider_keys.json`.
+- Commit code, migrations, README, and example config only.
