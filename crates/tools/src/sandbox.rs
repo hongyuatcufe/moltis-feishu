@@ -1100,12 +1100,12 @@ fn apple_container_exec_args(name: &str, shell_command: String) -> Vec<String> {
 }
 
 fn container_exec_shell_args(
-    cli: &str,
+    _cli: &str,
     container_name: &str,
     shell_command: String,
 ) -> Vec<String> {
     #[cfg(any(target_os = "macos", test))]
-    if cli == "container" {
+    if _cli == "container" {
         return apple_container_exec_args(container_name, shell_command);
     }
 

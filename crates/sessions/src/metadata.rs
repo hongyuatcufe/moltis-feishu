@@ -1838,6 +1838,64 @@ mod tests {
         assert_eq!(deleted, 0);
     }
 
+    #[tokio::test]
+    async fn test_run_migrations_adds_memory_owner_and_agent_mode() {
+        let pool = sqlx::SqlitePool::connect("sqlite::memory:").await.unwrap();
+        sqlx::query("CREATE TABLE IF NOT EXISTS projects (id TEXT PRIMARY KEY)")
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::query(
+            r#"CREATE TABLE IF NOT EXISTS sessions (
+                key             TEXT    PRIMARY KEY,
+                id              TEXT    NOT NULL,
+                label           TEXT,
+                model           TEXT,
+                created_at      INTEGER NOT NULL,
+                updated_at      INTEGER NOT NULL,
+                message_count   INTEGER NOT NULL DEFAULT 0,
+                project_id      TEXT    REFERENCES projects(id) ON DELETE SET NULL,
+                archived        INTEGER NOT NULL DEFAULT 0,
+                worktree_branch TEXT,
+                sandbox_enabled INTEGER,
+                sandbox_image   TEXT,
+                channel_binding TEXT
+            )"#,
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            r#"INSERT INTO sessions (
+                key, id, label, model, created_at, updated_at, message_count, project_id, archived,
+                worktree_branch, sandbox_enabled, sandbox_image, channel_binding
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"#,
+        )
+        .bind("main")
+        .bind("id-main")
+        .bind(Option::<String>::None)
+        .bind(Option::<String>::None)
+        .bind(0_i64)
+        .bind(0_i64)
+        .bind(0_i32)
+        .bind(Option::<String>::None)
+        .bind(0_i32)
+        .bind(Option::<String>::None)
+        .bind(Option::<i32>::None)
+        .bind(Option::<String>::None)
+        .bind(Option::<String>::None)
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        crate::run_migrations(&pool).await.unwrap();
+
+        let meta = SqliteSessionMetadata::new(pool);
+        let entry = meta.get("main").await.unwrap();
+        assert_eq!(entry.memory_owner_agent_id, None);
+        assert_eq!(entry.agent_mode, None);
+    }
+
     #[test]
     fn test_agent_id_serde_compat() {
         // Existing metadata without agent_id should deserialize fine.

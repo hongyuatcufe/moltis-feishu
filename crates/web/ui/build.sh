@@ -36,7 +36,7 @@ else
 fi
 
 if [[ "${1:-}" == "--watch" ]]; then
-  exec $TAILWIND -i input.css -o ../src/assets/style.css --watch
+  exec $TAILWIND -i input.css -o ../src/assets/css/style.css --watch
 else
-  exec $TAILWIND -i input.css -o ../src/assets/style.css --minify
+  exec $TAILWIND -i input.css -o ../src/assets/css/style.css --minify
 fi

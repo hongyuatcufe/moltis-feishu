@@ -8,7 +8,7 @@ var STATIC_ASSETS = [
   "/assets/css/layout.css",
   "/assets/css/chat.css",
   "/assets/css/components.css",
-  "/assets/style.css",
+  "/assets/css/style.css",
   "/assets/icons/icon-192.png",
   "/assets/icons/icon-512.png",
   "/assets/icons/apple-touch-icon.png",
