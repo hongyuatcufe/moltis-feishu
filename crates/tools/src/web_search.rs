@@ -15,7 +15,9 @@ use crate::error::Error;
 
 use {
     moltis_agents::tool_registry::AgentTool,
-    moltis_config::schema::{SearchProvider as ConfigSearchProvider, WebSearchConfig},
+    moltis_config::schema::{
+        SearchProvider as ConfigSearchProvider, TavilySearchDepth, WebSearchConfig,
+    },
 };
 
 use crate::exec::EnvVarProvider;
@@ -56,7 +58,7 @@ enum SearchProvider {
         model: String,
     },
     Tavily {
-        search_depth: String,
+        search_depth: TavilySearchDepth,
         include_answer: bool,
         include_domains: Vec<String>,
         exclude_domains: Vec<String>,
@@ -184,14 +186,9 @@ impl WebSearchTool {
                 if api_key.is_empty() {
                     return None;
                 }
-                let search_depth = config
-                    .tavily
-                    .search_depth
-                    .as_str()
-                    .to_string();
                 Some(Self::new(
                     SearchProvider::Tavily {
-                        search_depth,
+                        search_depth: config.tavily.search_depth.clone(),
                         include_answer: config.tavily.include_answer,
                         include_domains: config.tavily.include_domains.clone(),
                         exclude_domains: config.tavily.exclude_domains.clone(),
@@ -451,7 +448,7 @@ impl WebSearchTool {
         query: &str,
         count: u8,
         api_key: &str,
-        search_depth: &str,
+        search_depth: &TavilySearchDepth,
         include_answer: bool,
         include_domains: &[String],
         exclude_domains: &[String],
@@ -468,7 +465,7 @@ impl WebSearchTool {
         let mut body = serde_json::json!({
             "query": query,
             "max_results": count,
-            "search_depth": search_depth,
+            "search_depth": search_depth.as_str(),
             "include_answer": include_answer,
         });
 
@@ -958,7 +955,7 @@ mod tests {
     fn tavily_tool() -> WebSearchTool {
         WebSearchTool::new(
             SearchProvider::Tavily {
-                search_depth: "basic".into(),
+                search_depth: TavilySearchDepth::Basic,
                 include_answer: false,
                 include_domains: vec![],
                 exclude_domains: vec![],
@@ -1184,7 +1181,7 @@ mod tests {
     async fn test_tavily_missing_api_key_returns_hint() {
         let tool = tavily_tool();
         let result = tool
-            .search_tavily("test", 5, "", "basic", false, &[], &[])
+            .search_tavily("test", 5, "", &TavilySearchDepth::Basic, false, &[], &[])
             .await
             .unwrap();
         assert!(result["error"].as_str().unwrap().contains("not configured"));
