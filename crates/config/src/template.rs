@@ -365,7 +365,7 @@ deny = []                         # Tools to always deny (e.g., ["browser"])
 
 [tools.web.search]
 enabled = true                    # Enable web search tool
-provider = "brave"                # Search provider: "brave" or "perplexity"
+provider = "brave"                # Search provider: "brave", "perplexity", or "tavily"
 max_results = 5                   # Number of results to return (1-10)
 timeout_seconds = 30              # HTTP request timeout
 cache_ttl_minutes = 15            # Cache results for this many minutes (0 = no cache)
@@ -377,6 +377,14 @@ duckduckgo_fallback = false       # Off by default; enable only if you want DDG 
 # api_key = "..."                 # Or set PERPLEXITY_API_KEY env var
 # base_url = "..."                # API base URL (auto-detected from key prefix)
 # model = "sonar"                 # Perplexity model to use
+
+# Tavily-specific settings (when provider = "tavily")
+[tools.web.search.tavily]
+# api_key = "..."                 # Or set TAVILY_API_KEY env var
+# search_depth = "basic"          # "basic" or "advanced"
+# include_answer = false
+# include_domains = []
+# exclude_domains = []
 
 # ── Web Fetch ─────────────────────────────────────────────────────────────────
 

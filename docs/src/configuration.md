@@ -103,7 +103,7 @@ Configure the built-in `web_search` tool:
 ```toml
 [tools.web.search]
 enabled = true
-provider = "brave"               # "brave" or "perplexity"
+provider = "brave"               # "brave", "perplexity", or "tavily"
 max_results = 5                  # 1-10
 timeout_seconds = 30
 cache_ttl_minutes = 15
@@ -114,11 +114,18 @@ duckduckgo_fallback = false      # Default: do not use DuckDuckGo fallback
 # api_key = "..."                # Or use PERPLEXITY_API_KEY / OPENROUTER_API_KEY
 # base_url = "..."               # Optional override
 # model = "perplexity/sonar-pro" # Optional override
+
+[tools.web.search.tavily]
+# api_key = "..."                # Or set TAVILY_API_KEY env var
+# search_depth = "basic"         # "basic" or "advanced"
+# include_answer = false
+# include_domains = []
+# exclude_domains = []
 ```
 
 If no search API key is configured:
 
-- with `duckduckgo_fallback = false` (default), Moltis returns a clear hint to set `BRAVE_API_KEY` or `PERPLEXITY_API_KEY`
+- with `duckduckgo_fallback = false` (default), Moltis returns a clear hint to set `BRAVE_API_KEY`, `PERPLEXITY_API_KEY`, or `TAVILY_API_KEY`
 - with `duckduckgo_fallback = true`, Moltis attempts DuckDuckGo HTML search, which may hit CAPTCHA/rate limits
 
 ## Chat Message Queue

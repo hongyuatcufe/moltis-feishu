@@ -483,6 +483,7 @@ pub fn register_wasm_tools(
     search_timeout_secs: u64,
     search_cache_ttl_minutes: u64,
     search_api_key: Option<&str>,
+    tavily_api_key: Option<&str>,
 ) -> Result<()> {
     use std::collections::HashMap;
 
@@ -605,7 +606,16 @@ pub fn register_wasm_tools(
                     key.to_string(),
                 )]);
             }
-            let domain_allowlist = Some(vec!["api.search.brave.com".to_string()]);
+            if let Some(key) = tavily_api_key.filter(|k| !k.trim().is_empty()) {
+                secret_headers.insert("api.tavily.com".to_string(), vec![(
+                    "Authorization".to_string(),
+                    format!("Bearer {key}"),
+                )]);
+            }
+            let domain_allowlist = Some(vec![
+                "api.search.brave.com".to_string(),
+                "api.tavily.com".to_string(),
+            ]);
             match HttpHostImpl::new(
                 Duration::from_secs(search_timeout_secs),
                 2_000_000,
@@ -1110,7 +1120,7 @@ mod tests {
     fn register_wasm_tools_succeeds_with_available_components() {
         let mut registry = ToolRegistry::new();
         let limits = WasmToolLimits::default();
-        let result = super::register_wasm_tools(&mut registry, &limits, 100, 30, 5, 15, 5, None);
+        let result = super::register_wasm_tools(&mut registry, &limits, 100, 30, 5, 15, 5, None, None);
         // Should succeed regardless of whether wasm binaries are present.
         // When binaries are missing, individual tools log warnings but the
         // function itself returns Ok.

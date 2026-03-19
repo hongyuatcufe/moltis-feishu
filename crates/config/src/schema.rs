@@ -1615,6 +1615,26 @@ pub struct PerplexityConfig {
     pub model: Option<String>,
 }
 
+/// Tavily search depth.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum TavilySearchDepth {
+    #[default]
+    Basic,
+    Advanced,
+}
+
+impl TavilySearchDepth {
+    /// String representation for the Tavily API.
+    #[must_use]
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Basic => "basic",
+            Self::Advanced => "advanced",
+        }
+    }
+}
+
 /// Tavily search provider configuration.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(default)]
@@ -1626,8 +1646,8 @@ pub struct TavilyConfig {
         skip_serializing_if = "Option::is_none"
     )]
     pub api_key: Option<Secret<String>>,
-    /// Search depth: "basic" or "advanced" (default: "basic").
-    pub search_depth: Option<String>,
+    /// Search depth (default: basic).
+    pub search_depth: TavilySearchDepth,
     /// Whether to include a short answer in the response.
     #[serde(default)]
     pub include_answer: bool,

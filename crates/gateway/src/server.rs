@@ -3598,6 +3598,16 @@ pub async fn prepare_gateway(
                 .map(|s| s.expose_secret().clone())
                 .or_else(|| env_value_with_overrides(&runtime_env_overrides, "BRAVE_API_KEY"))
                 .filter(|k| !k.trim().is_empty());
+            let tavily_api_key = config
+                .tools
+                .web
+                .search
+                .tavily
+                .api_key
+                .as_ref()
+                .map(|s| s.expose_secret().clone())
+                .or_else(|| env_value_with_overrides(&runtime_env_overrides, "TAVILY_API_KEY"))
+                .filter(|k| !k.trim().is_empty());
             if let Err(e) = moltis_tools::wasm_tool_runner::register_wasm_tools(
                 &mut tool_registry,
                 &wasm_limits,
@@ -3607,6 +3617,7 @@ pub async fn prepare_gateway(
                 config.tools.web.search.timeout_seconds,
                 config.tools.web.search.cache_ttl_minutes,
                 brave_api_key.as_deref(),
+                tavily_api_key.as_deref(),
             ) {
                 warn!(%e, "wasm tool registration failed");
             }

@@ -29,7 +29,7 @@ impl Guest for WebSearchWasm {
     }
 
     fn description() -> String {
-        "Search the web through host HTTP capability (Brave Search API).".to_string()
+        "Search the web through host HTTP capability (Brave Search or Tavily API).".to_string()
     }
 
     fn parameters_schema() -> String {
