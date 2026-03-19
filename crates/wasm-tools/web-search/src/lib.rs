@@ -95,6 +95,20 @@ fn execute_impl(params_json: &str) -> Result<Value, ToolError> {
         .map(|n| n.clamp(1, 10))
         .and_then(|n| u8::try_from(n).ok())
         .unwrap_or(DEFAULT_RESULT_COUNT);
+
+    let provider = params
+        .get("_provider")
+        .and_then(Value::as_str)
+        .unwrap_or("brave");
+
+    match provider {
+        "tavily" => execute_tavily(query, count, &params),
+        _ => execute_brave(query, count, &params),
+    }
+}
+
+#[cfg(target_arch = "wasm32")]
+fn execute_brave(query: &str, count: u8, params: &Value) -> Result<Value, ToolError> {
     let accept_language = params.get("_accept_language").and_then(Value::as_str);
 
     let mut url = format!(
@@ -148,6 +162,65 @@ fn execute_impl(params_json: &str) -> Result<Value, ToolError> {
     }))
 }
 
+#[cfg(target_arch = "wasm32")]
+fn execute_tavily(query: &str, count: u8, params: &Value) -> Result<Value, ToolError> {
+    let search_depth = params
+        .get("_search_depth")
+        .and_then(Value::as_str)
+        .unwrap_or("basic");
+
+    let mut body = json!({
+        "query": query,
+        "max_results": count,
+        "search_depth": search_depth,
+    });
+
+    if let Some(include_answer) = params.get("_include_answer").and_then(Value::as_bool) {
+        body["include_answer"] = json!(include_answer);
+    }
+
+    let body_bytes = serde_json::to_vec(&body).map_err(|error| ToolError {
+        code: "json_serialize".to_string(),
+        message: error.to_string(),
+    })?;
+
+    let request = HttpRequest {
+        method: "POST".to_string(),
+        url: "https://api.tavily.com/search".to_string(),
+        headers: vec![("Content-Type".to_string(), "application/json".to_string())],
+        body: Some(body_bytes),
+        timeout_ms: Some(DEFAULT_TIMEOUT_MS),
+        max_response_bytes: Some(DEFAULT_MAX_RESPONSE_BYTES),
+    };
+
+    let response = outgoing_handler::handle(&request).map_err(map_http_error)?;
+    if !(200..300).contains(&response.status) {
+        return Ok(json!({
+            "error": format!("HTTP {}", response.status),
+            "query": query,
+        }));
+    }
+
+    let body_text = String::from_utf8_lossy(&response.body).into_owned();
+    let resp: Value = serde_json::from_str(&body_text).map_err(|error| ToolError {
+        code: "invalid_tavily_json".to_string(),
+        message: error.to_string(),
+    })?;
+    let results = parse_tavily_results(&resp);
+
+    let mut result = json!({
+        "provider": "tavily",
+        "query": query,
+        "results": results,
+    });
+
+    if let Some(answer) = resp.get("answer").and_then(Value::as_str) {
+        result["answer"] = json!(answer);
+    }
+
+    Ok(result)
+}
+
 fn parse_brave_results(body: &Value) -> Vec<Value> {
     body.get("web")
         .and_then(|web| web.get("results"))
@@ -171,6 +244,41 @@ fn parse_brave_results(body: &Value) -> Vec<Value> {
                     }
                     let description = result
                         .get("description")
+                        .and_then(Value::as_str)
+                        .unwrap_or("");
+                    Some(json!({
+                        "title": title,
+                        "url": url,
+                        "description": description,
+                    }))
+                })
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+fn parse_tavily_results(body: &Value) -> Vec<Value> {
+    body.get("results")
+        .and_then(Value::as_array)
+        .map(|results| {
+            results
+                .iter()
+                .filter_map(|result| {
+                    let title = result
+                        .get("title")
+                        .and_then(Value::as_str)
+                        .map(str::trim)
+                        .unwrap_or("");
+                    let url = result
+                        .get("url")
+                        .and_then(Value::as_str)
+                        .map(str::trim)
+                        .unwrap_or("");
+                    if title.is_empty() || url.is_empty() {
+                        return None;
+                    }
+                    let description = result
+                        .get("content")
                         .and_then(Value::as_str)
                         .unwrap_or("");
                     Some(json!({
@@ -362,6 +470,70 @@ mod tests {
             }
         });
         let results = parse_brave_results(&body);
+        assert_eq!(results[0]["description"], "");
+    }
+
+    // --- parse_tavily_results ---
+
+    #[test]
+    fn parses_tavily_results() {
+        let body = json!({
+            "results": [
+                {
+                    "title": "Example",
+                    "url": "https://example.com",
+                    "content": "An example site"
+                },
+                {
+                    "title": "Rust Lang",
+                    "url": "https://rust-lang.org",
+                    "content": "The Rust programming language"
+                }
+            ]
+        });
+        let results = parse_tavily_results(&body);
+        assert_eq!(results.len(), 2);
+        assert_eq!(results[0]["title"], "Example");
+        assert_eq!(results[0]["url"], "https://example.com");
+        assert_eq!(results[0]["description"], "An example site");
+        assert_eq!(results[1]["title"], "Rust Lang");
+    }
+
+    #[test]
+    fn tavily_skips_missing_title() {
+        let body = json!({
+            "results": [
+                { "url": "https://example.com", "content": "no title" },
+                { "title": "Has title", "url": "https://example.com" }
+            ]
+        });
+        let results = parse_tavily_results(&body);
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0]["title"], "Has title");
+    }
+
+    #[test]
+    fn tavily_handles_empty_results() {
+        let body = json!({ "results": [] });
+        let results = parse_tavily_results(&body);
+        assert!(results.is_empty());
+    }
+
+    #[test]
+    fn tavily_handles_missing_results_key() {
+        let body = json!({ "answer": "some answer" });
+        let results = parse_tavily_results(&body);
+        assert!(results.is_empty());
+    }
+
+    #[test]
+    fn tavily_content_defaults_to_empty() {
+        let body = json!({
+            "results": [
+                { "title": "No content", "url": "https://example.com" }
+            ]
+        });
+        let results = parse_tavily_results(&body);
         assert_eq!(results[0]["description"], "");
     }
 }

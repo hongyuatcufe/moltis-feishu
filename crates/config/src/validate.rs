@@ -185,6 +185,16 @@ fn build_schema_map() -> KnownKeys {
         ]))
     };
 
+    let tavily = || {
+        Struct(HashMap::from([
+            ("api_key", Leaf),
+            ("search_depth", Leaf),
+            ("include_answer", Leaf),
+            ("include_domains", Array(Box::new(Leaf))),
+            ("exclude_domains", Array(Box::new(Leaf))),
+        ]))
+    };
+
     let web_search = || {
         Struct(HashMap::from([
             ("enabled", Leaf),
@@ -195,6 +205,7 @@ fn build_schema_map() -> KnownKeys {
             ("cache_ttl_minutes", Leaf),
             ("duckduckgo_fallback", Leaf),
             ("perplexity", perplexity()),
+            ("tavily", tavily()),
         ]))
     };
 
