@@ -26,7 +26,7 @@ struct CacheEntry {
     expires_at: Instant,
 }
 
-/// Web search tool — lets the LLM search the web via Brave Search or Perplexity.
+/// Web search tool — lets the LLM search the web via Brave Search, Perplexity, or Tavily.
 ///
 /// When the configured provider's API key is missing and fallback is enabled,
 /// the tool falls back to DuckDuckGo HTML search.
@@ -187,8 +187,8 @@ impl WebSearchTool {
                 let search_depth = config
                     .tavily
                     .search_depth
-                    .clone()
-                    .unwrap_or_else(|| "basic".into());
+                    .as_str()
+                    .to_string();
                 Some(Self::new(
                     SearchProvider::Tavily {
                         search_depth,
@@ -1215,7 +1215,7 @@ mod tests {
             provider: ConfigSearchProvider::Tavily,
             tavily: moltis_config::schema::TavilyConfig {
                 api_key: Some(Secret::new("tvly-test-key".into())),
-                search_depth: Some("advanced".into()),
+                search_depth: moltis_config::schema::TavilySearchDepth::Advanced,
                 include_answer: true,
                 include_domains: vec!["example.com".into()],
                 exclude_domains: vec![],
