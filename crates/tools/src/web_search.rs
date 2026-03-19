@@ -55,6 +55,12 @@ enum SearchProvider {
         base_url_override: Option<String>,
         model: String,
     },
+    Tavily {
+        search_depth: String,
+        include_answer: bool,
+        include_domains: Vec<String>,
+        exclude_domains: Vec<String>,
+    },
 }
 
 fn env_value_with_overrides(env_overrides: &HashMap<String, String>, key: &str) -> Option<String> {
@@ -167,6 +173,36 @@ impl WebSearchTool {
                     config.duckduckgo_fallback,
                 ))
             },
+            ConfigSearchProvider::Tavily => {
+                let api_key = config
+                    .tavily
+                    .api_key
+                    .as_ref()
+                    .map(|s| s.expose_secret().clone())
+                    .or_else(|| env_value_with_overrides(env_overrides, "TAVILY_API_KEY"))
+                    .unwrap_or_default();
+                if api_key.is_empty() {
+                    return None;
+                }
+                let search_depth = config
+                    .tavily
+                    .search_depth
+                    .clone()
+                    .unwrap_or_else(|| "basic".into());
+                Some(Self::new(
+                    SearchProvider::Tavily {
+                        search_depth,
+                        include_answer: config.tavily.include_answer,
+                        include_domains: config.tavily.include_domains.clone(),
+                        exclude_domains: config.tavily.exclude_domains.clone(),
+                    },
+                    Secret::new(api_key),
+                    config.max_results,
+                    Duration::from_secs(config.timeout_seconds),
+                    Duration::from_secs(config.cache_ttl_minutes * 60),
+                    false, // No DDG fallback needed for Tavily
+                ))
+            },
         }
     }
 
@@ -233,6 +269,7 @@ impl WebSearchTool {
         match &self.provider {
             SearchProvider::Brave => &["BRAVE_API_KEY"],
             SearchProvider::Perplexity { .. } => &["PERPLEXITY_API_KEY", "OPENROUTER_API_KEY"],
+            SearchProvider::Tavily { .. } => &["TAVILY_API_KEY"],
         }
     }
 
@@ -407,6 +444,98 @@ impl WebSearchTool {
             "answer": answer,
             "citations": pplx.citations,
         }))
+    }
+
+    async fn search_tavily(
+        &self,
+        query: &str,
+        count: u8,
+        api_key: &str,
+        search_depth: &str,
+        include_answer: bool,
+        include_domains: &[String],
+        exclude_domains: &[String],
+    ) -> crate::Result<serde_json::Value> {
+        if api_key.trim().is_empty() {
+            return Ok(serde_json::json!({
+                "error": "Tavily API key not configured",
+                "hint": "Set TAVILY_API_KEY environment variable or tools.web.search.tavily.api_key in config"
+            }));
+        }
+
+        let client = crate::shared_http_client();
+
+        let mut body = serde_json::json!({
+            "query": query,
+            "max_results": count,
+            "search_depth": search_depth,
+            "include_answer": include_answer,
+        });
+
+        if !include_domains.is_empty() {
+            body["include_domains"] = serde_json::json!(include_domains);
+        }
+        if !exclude_domains.is_empty() {
+            body["exclude_domains"] = serde_json::json!(exclude_domains);
+        }
+
+        let resp = client
+            .post("https://api.tavily.com/search")
+            .timeout(self.timeout)
+            .header("Content-Type", "application/json")
+            .header("Authorization", format!("Bearer {api_key}"))
+            .json(&body)
+            .send()
+            .await?;
+
+        if !resp.status().is_success() {
+            let status = resp.status();
+            let text = resp.text().await.unwrap_or_default();
+            return Err(Error::message(format!(
+                "Tavily API returned {status}: {text}"
+            )));
+        }
+
+        let resp_body: serde_json::Value = resp.json().await.map_err(|error| {
+            Error::message(format!("failed to parse Tavily JSON response: {error}"))
+        })?;
+
+        let results: Vec<serde_json::Value> = resp_body
+            .get("results")
+            .and_then(serde_json::Value::as_array)
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(|r| {
+                        let title = r.get("title").and_then(|v| v.as_str()).unwrap_or("");
+                        let url = r.get("url").and_then(|v| v.as_str()).unwrap_or("");
+                        if title.is_empty() || url.is_empty() {
+                            return None;
+                        }
+                        let description =
+                            r.get("content").and_then(|v| v.as_str()).unwrap_or("");
+                        Some(serde_json::json!({
+                            "title": title,
+                            "url": url,
+                            "description": description,
+                        }))
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+
+        let mut result = serde_json::json!({
+            "provider": "tavily",
+            "query": query,
+            "results": results,
+        });
+
+        if include_answer {
+            if let Some(answer) = resp_body.get("answer").and_then(|v| v.as_str()) {
+                result["answer"] = serde_json::json!(answer);
+            }
+        }
+
+        Ok(result)
     }
 
     /// Check whether DuckDuckGo is temporarily blocked due to a prior CAPTCHA.
@@ -757,6 +886,23 @@ impl AgentTool for WebSearchTool {
                     self.search_perplexity(query, &api_key, &base_url, model)
                         .await?
                 },
+                SearchProvider::Tavily {
+                    search_depth,
+                    include_answer,
+                    include_domains,
+                    exclude_domains,
+                } => {
+                    self.search_tavily(
+                        query,
+                        count,
+                        &api_key,
+                        search_depth,
+                        *include_answer,
+                        include_domains,
+                        exclude_domains,
+                    )
+                    .await?
+                },
             }
         };
 
@@ -800,6 +946,22 @@ mod tests {
             SearchProvider::Perplexity {
                 base_url_override: Some("https://api.perplexity.ai".into()),
                 model: "sonar-pro".into(),
+            },
+            Secret::new(String::new()),
+            5,
+            Duration::from_secs(10),
+            Duration::from_secs(60),
+            false, // no network fallback in tests
+        )
+    }
+
+    fn tavily_tool() -> WebSearchTool {
+        WebSearchTool::new(
+            SearchProvider::Tavily {
+                search_depth: "basic".into(),
+                include_answer: false,
+                include_domains: vec![],
+                exclude_domains: vec![],
             },
             Secret::new(String::new()),
             5,
@@ -1016,6 +1178,52 @@ mod tests {
             .map(|n| n.clamp(1, 10) as u8)
             .unwrap_or(5);
         assert_eq!(count, 10);
+    }
+
+    #[tokio::test]
+    async fn test_tavily_missing_api_key_returns_hint() {
+        let tool = tavily_tool();
+        let result = tool
+            .search_tavily("test", 5, "", "basic", false, &[], &[])
+            .await
+            .unwrap();
+        assert!(result["error"].as_str().unwrap().contains("not configured"));
+        assert!(result["hint"].as_str().unwrap().contains("TAVILY_API_KEY"));
+    }
+
+    #[test]
+    fn test_tavily_api_key_candidates() {
+        let tool = tavily_tool();
+        assert_eq!(tool.api_key_candidates(), &["TAVILY_API_KEY"]);
+    }
+
+    #[test]
+    fn test_from_config_tavily_none_without_key() {
+        let cfg = WebSearchConfig {
+            provider: ConfigSearchProvider::Tavily,
+            ..Default::default()
+        };
+        assert!(
+            WebSearchTool::from_config(&cfg).is_none(),
+            "Tavily tool should not register without an API key"
+        );
+    }
+
+    #[test]
+    fn test_from_config_tavily_with_key() {
+        let cfg = WebSearchConfig {
+            provider: ConfigSearchProvider::Tavily,
+            tavily: moltis_config::schema::TavilyConfig {
+                api_key: Some(Secret::new("tvly-test-key".into())),
+                search_depth: Some("advanced".into()),
+                include_answer: true,
+                include_domains: vec!["example.com".into()],
+                exclude_domains: vec![],
+            },
+            ..Default::default()
+        };
+        let tool = WebSearchTool::from_config(&cfg);
+        assert!(tool.is_some(), "Tavily tool should register with an API key");
     }
 
     // --- DuckDuckGo fallback tests ---

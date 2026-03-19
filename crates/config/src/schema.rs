@@ -1550,6 +1550,7 @@ pub enum SearchProvider {
     #[default]
     Brave,
     Perplexity,
+    Tavily,
 }
 
 /// Web search tool configuration.
@@ -1577,6 +1578,8 @@ pub struct WebSearchConfig {
     pub duckduckgo_fallback: bool,
     /// Perplexity-specific settings.
     pub perplexity: PerplexityConfig,
+    /// Tavily-specific settings.
+    pub tavily: TavilyConfig,
 }
 
 impl Default for WebSearchConfig {
@@ -1590,6 +1593,7 @@ impl Default for WebSearchConfig {
             cache_ttl_minutes: 15,
             duckduckgo_fallback: false,
             perplexity: PerplexityConfig::default(),
+            tavily: TavilyConfig::default(),
         }
     }
 }
@@ -1609,6 +1613,30 @@ pub struct PerplexityConfig {
     pub base_url: Option<String>,
     /// Model to use.
     pub model: Option<String>,
+}
+
+/// Tavily search provider configuration.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct TavilyConfig {
+    /// API key (overrides `TAVILY_API_KEY` env var).
+    #[serde(
+        default,
+        serialize_with = "serialize_option_secret",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub api_key: Option<Secret<String>>,
+    /// Search depth: "basic" or "advanced" (default: "basic").
+    pub search_depth: Option<String>,
+    /// Whether to include a short answer in the response.
+    #[serde(default)]
+    pub include_answer: bool,
+    /// Restrict results to these domains.
+    #[serde(default)]
+    pub include_domains: Vec<String>,
+    /// Exclude results from these domains.
+    #[serde(default)]
+    pub exclude_domains: Vec<String>,
 }
 
 /// Web fetch tool configuration.
