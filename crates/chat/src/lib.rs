@@ -8426,6 +8426,8 @@ async fn send_location_to_channels(
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 #[cfg(test)]
 mod tests {
+    static DATA_DIR_TEST_GUARD: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
     use {
         super::*,
         anyhow::Result,
@@ -8684,6 +8686,13 @@ mod tests {
 
     #[test]
     fn session_agent_helpers_split_persona_from_memory_owner() {
+        let _guard = DATA_DIR_TEST_GUARD
+            .lock()
+            .expect("data dir test guard poisoned");
+        let temp = tempfile::tempdir().expect("tempdir");
+        moltis_config::set_data_dir(temp.path().to_path_buf());
+        let workspace = moltis_config::agent_workspace_dir("writer");
+        std::fs::create_dir_all(&workspace).expect("create writer workspace");
         let entry = test_session_entry();
         assert_eq!(resolve_prompt_agent_id(Some(&entry)), "writer");
         assert_eq!(resolve_memory_owner_agent_id(Some(&entry)), "main");
@@ -8691,6 +8700,7 @@ mod tests {
             resolve_session_agent_mode(Some(&entry)),
             AGENT_MODE_EPHEMERAL
         );
+        moltis_config::clear_data_dir();
     }
 
     #[async_trait]
@@ -9939,6 +9949,16 @@ mod tests {
             )
             .await
             .expect("seed channel session history");
+        store
+            .append(
+                session_key,
+                &serde_json::json!({
+                    "role": "user",
+                    "content": "previous user turn"
+                }),
+            )
+            .await
+            .expect("seed second channel session message");
 
         let send_result = chat
             .send(serde_json::json!({
@@ -9970,7 +9990,7 @@ mod tests {
         .await
         .expect("assistant reply should be persisted");
 
-        assert_eq!(history.len(), 3);
+        assert_eq!(history.len(), 4);
         assert_eq!(
             history[0].get("role").and_then(Value::as_str),
             Some("assistant")
@@ -9983,7 +10003,15 @@ mod tests {
         );
         assert_eq!(history[1].get("role").and_then(Value::as_str), Some("user"));
         assert_eq!(
+            history[1].get("content").and_then(Value::as_str),
+            Some("previous user turn")
+        );
+        assert_eq!(
             history[2].get("content").and_then(Value::as_str),
+            Some("ping")
+        );
+        assert_eq!(
+            history[3].get("content").and_then(Value::as_str),
             Some("final reply")
         );
 
