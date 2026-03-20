@@ -46,6 +46,9 @@ This repository is a custom `moltis` fork focused on Feishu integration, Chinese
 - `web_fetch` 已修复中文页面抓取中的 GBK/GB18030 与 UTF-8 乱码问题。
 - `web_fetch` now handles Chinese pages more reliably, including GBK/GB18030 and UTF-8 decoding paths.
 
+- 工具分工更明确：`web_cn_search` 用于搜中文结果，`web_read` 用于读全文，`web_fetch` 用于直接抓取指定 URL。
+- Tool responsibilities are explicit: `web_cn_search` is for Chinese search results, `web_read` is for full-text reading, and `web_fetch` is for direct fetching of a known URL.
+
 - provider 缺 key 或单项配置错误时按组件降级，不阻塞其他已配置 provider。
 - Missing API keys or invalid provider-specific config degrade per component instead of blocking the rest.
 
@@ -120,6 +123,10 @@ session_auto_archive_days = 30
 
 ### `web_cn_search`
 
+适合“先搜到结果”：
+
+Use this when you need search results first:
+
 至少配置一个 provider：
 
 Configure at least one provider:
@@ -138,6 +145,10 @@ enabled = true
 ```
 
 ### `web_search` with Tavily
+
+适合通用联网搜索，不限定中文站点：
+
+Use this for general web search, not limited to Chinese sites:
 
 ```toml
 [tools.web.search]
@@ -158,6 +169,10 @@ exclude_domains = []
 
 ### `web_fetch`
 
+适合“我已经知道目标 URL，只想直接抓页面内容”：
+
+Use this when you already know the target URL and want to fetch that page directly:
+
 ```toml
 [tools.web.fetch]
 enabled = true
@@ -168,7 +183,23 @@ max_redirects = 3
 readability = true
 ```
 
+说明：
+
+- `web_fetch` 直接请求原网页并提取内容
+- 适合已知 URL 的轻量抓取
+- 当前分支已修复常见中文网页的乱码问题
+
+Notes:
+
+- `web_fetch` requests the original page directly and extracts content
+- Best for lightweight fetches of a known URL
+- This branch includes fixes for common Chinese-page encoding issues
+
 ### `web_read`
+
+适合“我要正文/全文，不只是搜索结果摘要”：
+
+Use this when you want the main body or full text, not just search-result snippets:
 
 ```toml
 [tools.web.read]
@@ -182,6 +213,27 @@ name = "main"
 api_key = "YOUR_JINA_API_KEY"
 enabled = true
 ```
+
+说明：
+
+- `web_read` 是全文读取器，不只是搜索工具
+- 当前支持 `jina`、`metaso`、`crawl4ai`、`pinchtab`
+- 推荐把 `jina` 或 `metaso` 作为全文读取后端
+- 如果你已经有 URL 并且只想简单抓取，可优先试 `web_fetch`
+
+Notes:
+
+- `web_read` is a full-text reader, not just a search tool
+- Supported backends: `jina`, `metaso`, `crawl4ai`, `pinchtab`
+- Prefer `jina` or `metaso` as full-text backends
+- If you already have a URL and only need a simple fetch, try `web_fetch` first
+
+### Which Tool To Use / 该用哪个工具
+
+1. 先搜中文网页结果：`web_cn_search`
+2. 先做通用联网搜索：`web_search`
+3. 已知 URL，直接抓页面：`web_fetch`
+4. 需要正文或全文读取：`web_read`
 
 ### Supported Environment Variables / 支持的环境变量
 

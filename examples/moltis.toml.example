@@ -89,6 +89,8 @@ include_domains = []
 exclude_domains = []
 
 # Direct page fetch
+# Use web_fetch when you already know the URL and want to fetch that page.
+# 已知目标 URL 且只想直接抓页面时，用 web_fetch。
 [tools.web.fetch]
 enabled = true
 max_chars = 50000
@@ -132,6 +134,8 @@ api_key = "YOUR_JINA_API_KEY"
 enabled = true
 
 # Full-text reading fallback chain
+# Use web_read when you want article body/full text, not just search results.
+# 已知需要正文/全文而不只是搜索结果摘要时，用 web_read。
 [tools.web.read]
 enabled = true
 min_chars = 300
@@ -161,6 +165,12 @@ timeout_seconds = 60
 endpoint = "http://127.0.0.1:9867"
 token = ""
 timeout_seconds = 60
+
+# Tool selection summary:
+# - web_cn_search: Chinese search results
+# - web_search: general web search (Tavily)
+# - web_fetch: direct fetch for a known URL
+# - web_read: article body / full-text reading
 
 # Browser tool remains optional but useful for JS-heavy pages
 [tools.browser]
