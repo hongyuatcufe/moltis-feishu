@@ -11,6 +11,7 @@
 - [Comparison](comparison.md)
 - [Configuration](configuration.md)
 - [Local Validation](local-validation.md)
+- [bd Guide](bd-guide.md)
 - [End-to-End Testing](e2e-testing.md)
 
 ---
