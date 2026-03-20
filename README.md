@@ -98,6 +98,92 @@ Run from the local build:
 ./target/release/moltis
 ```
 
+## Download Prebuilt Binaries / 下载预构建二进制
+
+如果你不想在本地编译，可以直接从 GitHub Releases 下载预构建二进制。
+
+If you do not want to build locally, download a prebuilt binary from GitHub Releases:
+
+- `https://github.com/hongyuatcufe/moltis-feishu/releases`
+
+当前计划提供这些目标：
+
+Planned targets:
+
+- `aarch64-apple-darwin`
+- `x86_64-apple-darwin`
+- `aarch64-unknown-linux-gnu`
+- `x86_64-unknown-linux-gnu`
+
+资产命名格式：
+
+Asset naming format:
+
+- `moltis-<VERSION>-<TARGET>.tar.gz`
+- `moltis-<VERSION>-<TARGET>.tar.gz.sha256`
+
+安装示例（macOS/Linux）：
+
+Example install flow (macOS/Linux):
+
+```bash
+VERSION=20260320.01
+TARGET=aarch64-apple-darwin
+
+curl -LO "https://github.com/hongyuatcufe/moltis-feishu/releases/download/${VERSION}/moltis-${VERSION}-${TARGET}.tar.gz"
+curl -LO "https://github.com/hongyuatcufe/moltis-feishu/releases/download/${VERSION}/moltis-${VERSION}-${TARGET}.tar.gz.sha256"
+shasum -a 256 -c "moltis-${VERSION}-${TARGET}.tar.gz.sha256"
+tar xzf "moltis-${VERSION}-${TARGET}.tar.gz"
+cd "moltis-${VERSION}-${TARGET}"
+./moltis
+```
+
+说明：
+
+- 这套二进制发布会用 `embedded-assets` 和 `embedded-wasm` 构建
+- 解压后可直接运行，不依赖额外的 `share/moltis/` 目录
+- 配置文件仍默认读取 `~/.config/moltis/moltis.toml`
+
+Notes:
+
+- These binaries are built with `embedded-assets` and `embedded-wasm`
+- You can run them directly after extracting the archive
+- Config still defaults to `~/.config/moltis/moltis.toml`
+
+### Maintainer Release Flow / 维护者发布流程
+
+仓库内置了轻量发布 workflow：
+
+The repository includes a lightweight release workflow:
+
+- `.github/workflows/binary-release.yml`
+
+用法：
+
+Usage:
+
+1. 打开 GitHub Actions
+2. 选择 `Binary Release`
+3. 输入版本号，例如 `20260320.01`
+4. 选择是否以 draft 形式创建 release
+
+1. Open GitHub Actions
+2. Select `Binary Release`
+3. Enter a version such as `20260320.01`
+4. Choose whether to create the release as a draft
+
+这条 workflow 会：
+
+This workflow will:
+
+1. 构建 macOS 与 Linux 的 4 个目标二进制
+2. 生成 `.tar.gz` 和 `.sha256`
+3. 自动创建或更新同名 GitHub Release
+
+1. Build 4 macOS/Linux targets
+2. Generate `.tar.gz` and `.sha256`
+3. Create or update the matching GitHub Release automatically
+
 ## Config Example / 配置示例
 
 示例配置文件：
