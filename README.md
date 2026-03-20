@@ -60,13 +60,14 @@ This repository is a custom `moltis` fork focused on Feishu integration, Chinese
 - Feishu 出站语音回复链路已接入；入站飞书语音转写当前分支未启用。
 - Outbound Feishu voice replies are wired up; inbound Feishu voice transcription is not currently enabled on this branch.
 
-## Install From This Branch / 从本分支安装
+## Build From Source / 从源码构建
 
 ### Recommended: Clone And Build / 推荐：克隆源码构建
 
 ```bash
 git clone https://github.com/hongyuatcufe/moltis-feishu.git
 cd moltis-feishu
+rustup toolchain install nightly-2025-11-30
 cd crates/web/ui
 ./build.sh
 cd ../../..
@@ -76,15 +77,25 @@ cargo build --release
 
 说明：
 
-- 首次源码构建前需要先生成 Web UI 资源 `crates/web/src/assets/style.css`
-- 因此当前分支不建议直接使用 `cargo install --git ...`
+- 本仓库固定使用 `nightly-2025-11-30`
+- `./build.sh` 会生成 Web UI 资源 `crates/web/src/assets/css/style.css`
+- 本地源码构建完成后的可执行文件是 `./target/release/moltis`
+- 因此当前仓库不建议直接使用 `cargo install --git ...`
 
-安装后运行：
+如果你想安装到 `PATH`：
 
-After installation:
+If you want to install it into your `PATH`:
 
 ```bash
-moltis
+cargo install --path crates/cli --force
+```
+
+本地源码构建后运行：
+
+Run from the local build:
+
+```bash
+./target/release/moltis
 ```
 
 ## Config Example / 配置示例
@@ -250,7 +261,7 @@ Notes:
 Validate config first:
 
 ```bash
-cargo run -- config check
+./target/release/moltis config check
 ```
 
 然后启动：
@@ -258,7 +269,7 @@ cargo run -- config check
 Then start the server:
 
 ```bash
-cargo run --release
+./target/release/moltis
 ```
 
 建议的回归检查：
