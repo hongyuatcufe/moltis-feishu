@@ -557,6 +557,12 @@ fn register_web_tools(
     ) {
         tool_registry.register(Box::new(t));
     }
+    if let Some(t) = moltis_tools::web_read::WebReadTool::from_config_with_env_overrides(
+        &config.tools.web.read,
+        runtime_env_overrides,
+    ) {
+        tool_registry.register(Box::new(t));
+    }
 }
 
 // ── Shared app state ─────────────────────────────────────────────────────────
@@ -6408,7 +6414,7 @@ mod tests {
     }
 
     #[test]
-    fn register_web_tools_includes_cn_search_when_enabled() {
+    fn register_web_tools_includes_cn_search_and_read_when_enabled() {
         #[derive(Default)]
         struct NoopEnvProvider;
 
@@ -6430,6 +6436,8 @@ mod tests {
             api_key: Secret::new("metaso-test".into()),
             enabled: true,
         }];
+        cfg.tools.web.read.enabled = true;
+        cfg.tools.web.read.spider.enabled = true;
 
         let env_provider: Arc<dyn EnvVarProvider> = Arc::new(NoopEnvProvider);
         let mut registry = moltis_agents::tool_registry::ToolRegistry::new();
@@ -6447,6 +6455,7 @@ mod tests {
             .collect();
         assert!(tool_names.contains("web_search"));
         assert!(tool_names.contains("web_cn_search"));
+        assert!(tool_names.contains("web_read"));
     }
 
     #[tokio::test]

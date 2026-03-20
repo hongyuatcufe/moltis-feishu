@@ -209,7 +209,7 @@ impl WebFetchTool {
     }
 }
 
-fn decode_response_body(headers: &reqwest::header::HeaderMap, body: &[u8]) -> String {
+pub(crate) fn decode_response_body(headers: &reqwest::header::HeaderMap, body: &[u8]) -> String {
     if let Some(encoding) = detect_charset_from_headers(headers) {
         let (decoded, ..) = encoding.decode(body);
         return decoded.into_owned();
@@ -262,7 +262,7 @@ fn detect_charset_from_html(body: &[u8]) -> Option<&'static Encoding> {
 }
 
 /// Extract readable content from the response body based on content type.
-fn extract_content(
+pub(crate) fn extract_content(
     body: &str,
     content_type: &str,
     requested_mode: &str,
@@ -297,7 +297,7 @@ fn extract_content(
 /// Simple HTML to text conversion: strip tags, decode basic entities,
 /// collapse whitespace. A lightweight alternative to a full readability
 /// crate — good enough for most pages.
-fn html_to_text(html: &str) -> String {
+pub(crate) fn html_to_text(html: &str) -> String {
     static SCRIPT_RE: OnceLock<Regex> = OnceLock::new();
     static STYLE_RE: OnceLock<Regex> = OnceLock::new();
     static BLOCK_RE: OnceLock<Regex> = OnceLock::new();

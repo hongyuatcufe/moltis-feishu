@@ -7,23 +7,25 @@ use std::{
 
 use {anyhow::Result, async_trait::async_trait, secrecy::ExposeSecret, tracing::warn, url::Url};
 
-use {moltis_agents::tool_registry::AgentTool, moltis_config::schema::WebReadConfig};
+use {
+    moltis_agents::tool_registry::AgentTool,
+    moltis_config::schema::WebReadConfig,
+    spider::{ClientBuilder, utils::fetch_page_html},
+};
+
+use crate::web_fetch::{decode_response_body, extract_content};
 
 const JINA_READER_URL: &str = "https://r.jina.ai/";
 const METASO_READER_URL: &str = "https://metaso.cn/api/v1/reader";
 
-/// Web page full-text fetcher with 4-level auto-fallback.
+/// Web page full-text fetcher with API-first fallback.
 pub struct WebReadTool {
     jina_key: Option<String>,
     metaso_key: Option<String>,
     jina_enabled: bool,
     metaso_enabled: bool,
-    crawl4ai_endpoint: String,
-    crawl4ai_token: String,
-    crawl4ai_timeout_secs: u64,
-    pinchtab_endpoint: String,
-    pinchtab_token: String,
-    pinchtab_timeout_secs: u64,
+    spider_enabled: bool,
+    spider_timeout: Duration,
     min_chars: usize,
     ssrf_allowlist: Vec<ipnet::IpNet>,
     cache: Mutex<HashMap<String, CacheEntry>>,
@@ -46,6 +48,7 @@ impl WebReadTool {
         }
         let jina_enabled = config.jina.enabled;
         let metaso_enabled = config.metaso.enabled;
+        let spider_enabled = config.spider.enabled;
 
         let jina_key = first_enabled_key(&config.jina)
             .map(|s| s.to_owned())
@@ -71,12 +74,8 @@ impl WebReadTool {
             metaso_key,
             jina_enabled,
             metaso_enabled,
-            crawl4ai_endpoint: config.crawl4ai.endpoint.clone(),
-            crawl4ai_token: config.crawl4ai.api_token.expose_secret().to_string(),
-            crawl4ai_timeout_secs: config.crawl4ai.timeout_seconds,
-            pinchtab_endpoint: config.pinchtab.endpoint.clone(),
-            pinchtab_token: config.pinchtab.token.expose_secret().to_string(),
-            pinchtab_timeout_secs: config.pinchtab.timeout_seconds,
+            spider_enabled,
+            spider_timeout: Duration::from_secs(config.spider.timeout_seconds),
             min_chars: config.min_chars,
             ssrf_allowlist,
             cache: Mutex::new(HashMap::new()),
@@ -89,15 +88,6 @@ impl WebReadTool {
         if metaso_enabled && tool.metaso_key.is_none() {
             warn!("web_read: metaso enabled but no API key configured");
         }
-        if !tool.crawl4ai_endpoint.is_empty() && tool.crawl4ai_token.is_empty() {
-            warn!("web_read: crawl4ai endpoint set but api_token is missing");
-        }
-        if !tool.pinchtab_endpoint.is_empty() && tool.pinchtab_token.trim().is_empty() {
-            warn!("web_read: pinchtab endpoint set but token is missing");
-        }
-        if tool.pinchtab_endpoint.trim().is_empty() && !tool.pinchtab_token.trim().is_empty() {
-            warn!("web_read: pinchtab token set but endpoint is missing");
-        }
         if !tool.is_configured() {
             warn!("web_read enabled but no backends are configured");
         }
@@ -106,10 +96,7 @@ impl WebReadTool {
     }
 
     fn is_configured(&self) -> bool {
-        self.jina_key.is_some()
-            || self.metaso_key.is_some()
-            || self.crawl4ai_configured()
-            || self.pinchtab_configured()
+        self.jina_key.is_some() || self.metaso_key.is_some() || self.spider_enabled
     }
 
     fn warnings(&self) -> Vec<String> {
@@ -120,19 +107,8 @@ impl WebReadTool {
         if self.metaso_enabled && self.metaso_key.is_none() {
             warnings.push("metaso enabled but no API key configured".to_string());
         }
-        if !self.crawl4ai_endpoint.is_empty() && self.crawl4ai_token.is_empty() {
-            warnings.push("crawl4ai endpoint set but api_token is missing".to_string());
-        }
-        if !self.pinchtab_endpoint.is_empty() && self.pinchtab_token.trim().is_empty() {
-            warnings.push("pinchtab endpoint set but token is missing".to_string());
-        }
-        if self.pinchtab_endpoint.trim().is_empty() && !self.pinchtab_token.trim().is_empty() {
-            warnings.push("pinchtab token set but endpoint is missing".to_string());
-        }
         if warnings.is_empty() && !self.is_configured() {
-            warnings.push(
-                "no web_read backends configured (jina/metaso/crawl4ai/pinchtab)".to_string(),
-            );
+            warnings.push("no web_read backends configured (jina/metaso/spider)".to_string());
         }
         warnings
     }
@@ -152,14 +128,6 @@ impl WebReadTool {
             "data": output,
             "warnings": warnings,
         })
-    }
-
-    fn crawl4ai_configured(&self) -> bool {
-        !self.crawl4ai_endpoint.is_empty() && !self.crawl4ai_token.is_empty()
-    }
-
-    fn pinchtab_configured(&self) -> bool {
-        !self.pinchtab_endpoint.trim().is_empty() && !self.pinchtab_token.trim().is_empty()
     }
 
     fn cache_get(&self, key: &str) -> Option<serde_json::Value> {
@@ -255,74 +223,52 @@ impl WebReadTool {
         Ok(raw)
     }
 
-    async fn try_crawl4ai(&self, url: &str) -> Result<String> {
-        if !self.crawl4ai_configured() {
-            anyhow::bail!("Crawl4AI not configured");
+    async fn try_spider(&self, url: &str) -> Result<String> {
+        if !self.spider_enabled {
+            anyhow::bail!("spider not enabled");
         }
-        let client_timeout = self.crawl4ai_timeout_secs.saturating_add(30);
-        let client = self.client_fast(client_timeout)?;
-        let body = serde_json::json!({
-            "urls": [url],
-            "crawler_run_config": {
-                "word_count_threshold": 50,
-                "excluded_tags": ["nav", "footer", "header", "aside"]
-            }
-        });
-        let resp = client
-            .post(format!(
-                "{}/crawl",
-                self.crawl4ai_endpoint.trim_end_matches('/')
-            ))
-            .bearer_auth(&self.crawl4ai_token)
-            .json(&body)
-            .send()
-            .await?;
-        if !resp.status().is_success() {
-            anyhow::bail!("Crawl4AI {} — {}", resp.status(), url);
-        }
-        let data: serde_json::Value = resp.json().await?;
-        let result = &data["results"][0];
-        if !result["success"].as_bool().unwrap_or(true) {
-            let err = result["error_message"].as_str().unwrap_or("unknown error");
-            anyhow::bail!("Crawl4AI page error: {err}");
-        }
-        let md_field = &result["markdown"];
-        let md = md_field
-            .as_str()
-            .filter(|s| !s.is_empty())
-            .or_else(|| md_field["fit_markdown"].as_str().filter(|s| !s.is_empty()))
-            .or_else(|| md_field["raw_markdown"].as_str().filter(|s| !s.is_empty()))
-            .unwrap_or("");
-        Ok(md.to_string())
-    }
 
-    async fn try_pinchtab(&self, url: &str) -> Result<String> {
-        if !self.pinchtab_configured() {
-            anyhow::bail!("Pinchtab not configured (token required)");
+        let client = ClientBuilder::new()
+            .timeout(self.spider_timeout)
+            .connect_timeout(Duration::from_secs(10))
+            .user_agent("Moltis/1.0")
+            .build()?;
+        let page = tokio::time::timeout(self.spider_timeout, fetch_page_html(url, &client))
+            .await
+            .map_err(|_| anyhow::anyhow!("spider timed out after {:?}", self.spider_timeout))?;
+        if !page.status_code.is_success() {
+            anyhow::bail!("spider {} — {}", page.status_code, url);
         }
-        let client = self.client_fast(self.pinchtab_timeout_secs)?;
-        let body = serde_json::json!({ "url": url, "format": "markdown" });
-        let resp = client
-            .post(format!(
-                "{}/api/fetch",
-                self.pinchtab_endpoint.trim_end_matches('/')
-            ))
-            .header("Authorization", format!("Bearer {}", self.pinchtab_token))
-            .json(&body)
-            .send()
-            .await?;
-        if !resp.status().is_success() {
-            let status = resp.status();
-            let text = resp.text().await.unwrap_or_default();
-            anyhow::bail!("Pinchtab {status} — {}", truncate(&text, 200));
+
+        let body = page
+            .content
+            .as_deref()
+            .ok_or_else(|| anyhow::anyhow!("spider returned no body"))?;
+        let content_type = page
+            .headers
+            .as_ref()
+            .and_then(|headers| {
+                headers
+                    .get(reqwest::header::CONTENT_TYPE)
+                    .and_then(|value| value.to_str().ok())
+            })
+            .unwrap_or("text/html");
+        let decoded = page
+            .headers
+            .as_ref()
+            .map(|headers| decode_response_body(headers, body))
+            .unwrap_or_else(|| String::from_utf8_lossy(body).into_owned());
+        let (content, _) = extract_content(&decoded, content_type, "text", true);
+        if content.trim().is_empty() {
+            anyhow::bail!("spider returned empty content");
         }
-        Ok(resp.text().await?)
+        Ok(content)
     }
 
     async fn fetch(&self, url: &str, with_links: bool) -> Result<serde_json::Value> {
         if !self.is_configured() {
             anyhow::bail!(
-                "No web_read backends configured. Set tools.web.read (jina/metaso/crawl4ai/pinchtab) \
+                "No web_read backends configured. Set tools.web.read (jina/metaso/spider) \
                  or env JINA_API_KEY / METASO_API_KEY."
             );
         }
@@ -359,26 +305,15 @@ impl WebReadTool {
             Err(e) => errors.push(format!("metaso: {e}")),
         }
 
-        match self.try_crawl4ai(url).await {
+        match self.try_spider(url).await {
             Ok(content) => {
                 if content.len() >= self.min_chars {
-                    let result = fmt_result("crawl4ai", url, &content);
+                    let result = fmt_result("spider", url, &content);
                     self.cache_set(cache_key, result.clone());
                     return Ok(result);
                 }
             },
-            Err(e) => errors.push(format!("crawl4ai: {e}")),
-        }
-
-        match self.try_pinchtab(url).await {
-            Ok(content) => {
-                if content.len() >= self.min_chars {
-                    let result = fmt_result("pinchtab", url, &content);
-                    self.cache_set(cache_key, result.clone());
-                    return Ok(result);
-                }
-            },
-            Err(e) => errors.push(format!("pinchtab: {e}")),
+            Err(e) => errors.push(format!("spider: {e}")),
         }
 
         anyhow::bail!("all backends failed: {}", errors.join("; "))
@@ -392,7 +327,7 @@ impl AgentTool for WebReadTool {
     }
 
     fn description(&self) -> &str {
-        "Fetch web page full-text via 4-level auto-fallback chain (Jina → Metaso → Crawl4AI → Pinchtab). \
+        "Fetch web page full-text via auto-fallback chain (Jina → Metaso → spider). \
          Requires provider API keys (tools.web.read or env JINA_API_KEY / METASO_API_KEY)."
     }
 
@@ -535,18 +470,12 @@ mod tests {
     }
 
     #[test]
-    fn warnings_include_pinchtab_endpoint_mismatch() {
+    fn spider_enabled_counts_as_configured() {
         let mut cfg = WebReadConfig::default();
         cfg.enabled = true;
-        cfg.pinchtab.endpoint = String::new();
-        cfg.pinchtab.token = secrecy::Secret::new("token".to_string());
+        cfg.spider.enabled = true;
         let tool = WebReadTool::from_config_with_env_overrides(&cfg, &HashMap::new()).unwrap();
-        let warnings = tool.warnings();
-        assert!(
-            warnings
-                .iter()
-                .any(|w| w.contains("pinchtab token set but endpoint is missing"))
-        );
+        assert!(tool.is_configured());
     }
 
     #[test]
@@ -563,5 +492,39 @@ mod tests {
 
         assert!(tool.is_configured());
         assert!(tool.warnings().iter().all(|w| !w.contains("jina enabled")));
+    }
+
+    #[tokio::test]
+    async fn spider_backend_reads_local_page_when_allowlisted() {
+        let mut cfg = WebReadConfig::default();
+        cfg.enabled = true;
+        cfg.spider.enabled = true;
+        cfg.min_chars = 5;
+        cfg.ssrf_allowlist = vec!["127.0.0.1/32".to_string()];
+
+        let mut server = mockito::Server::new_async().await;
+        let page_url = format!("{}/article", server.url());
+        let _mock = server
+            .mock("GET", "/article")
+            .with_status(200)
+            .with_header("content-type", "text/html; charset=utf-8")
+            .with_body(
+                "<html><body><article><h1>Hello</h1><p>Spider body</p></article></body></html>",
+            )
+            .create_async()
+            .await;
+
+        let tool = WebReadTool::from_config_with_env_overrides(&cfg, &HashMap::new()).unwrap();
+        let result = tool
+            .execute(serde_json::json!({ "url": page_url }))
+            .await
+            .unwrap();
+
+        assert_eq!(result["backend"], "spider");
+        assert!(
+            result["content"]
+                .as_str()
+                .is_some_and(|content| content.contains("Spider body"))
+        );
     }
 }

@@ -40,8 +40,8 @@ This repository is a custom `moltis` fork focused on Feishu integration, Chinese
 - `web_search` 支持 Tavily，可作为通用联网检索入口。
 - `web_search` supports Tavily as a configurable general web-search provider.
 
-- `web_read` 工具：Jina、Metaso、Crawl4AI、PinchTab 回退链路。
-- `web_read`: fallback chain across Jina, Metaso, Crawl4AI, and PinchTab.
+- `web_read` 工具：Jina、Metaso、spider 回退链路。
+- `web_read`: fallback chain across Jina, Metaso, and spider.
 
 - `web_fetch` 已修复中文页面抓取中的 GBK/GB18030 与 UTF-8 乱码问题。
 - `web_fetch` now handles Chinese pages more reliably, including GBK/GB18030 and UTF-8 decoding paths.
@@ -223,20 +223,32 @@ enabled = true
 name = "main"
 api_key = "YOUR_JINA_API_KEY"
 enabled = true
+
+[tools.web.read.metaso]
+enabled = true
+
+[[tools.web.read.metaso.accounts]]
+name = "main"
+api_key = "YOUR_METASO_API_KEY"
+enabled = true
+
+[tools.web.read.spider]
+enabled = true
+timeout_seconds = 20
 ```
 
 说明：
 
 - `web_read` 是全文读取器，不只是搜索工具
-- 当前支持 `jina`、`metaso`、`crawl4ai`、`pinchtab`
-- 推荐把 `jina` 或 `metaso` 作为全文读取后端
+- 当前支持 `jina`、`metaso`、`spider`
+- 推荐把 `jina` 或 `metaso` 作为首选全文读取后端，`spider` 作为本地 Rust 兜底
 - 如果你已经有 URL 并且只想简单抓取，可优先试 `web_fetch`
 
 Notes:
 
 - `web_read` is a full-text reader, not just a search tool
-- Supported backends: `jina`, `metaso`, `crawl4ai`, `pinchtab`
-- Prefer `jina` or `metaso` as full-text backends
+- Supported backends: `jina`, `metaso`, `spider`
+- Prefer `jina` or `metaso` as primary full-text backends, with `spider` as the local Rust fallback
 - If you already have a URL and only need a simple fetch, try `web_fetch` first
 
 ### Which Tool To Use / 该用哪个工具

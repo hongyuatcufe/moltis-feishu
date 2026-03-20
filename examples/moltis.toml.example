@@ -156,21 +156,15 @@ name = "metaso-main"
 api_key = "YOUR_METASO_API_KEY"
 enabled = true
 
-[tools.web.read.crawl4ai]
-endpoint = ""
-api_token = ""
-timeout_seconds = 60
-
-[tools.web.read.pinchtab]
-endpoint = "http://127.0.0.1:9867"
-token = ""
-timeout_seconds = 60
+[tools.web.read.spider]
+enabled = true
+timeout_seconds = 20
 
 # Tool selection summary:
 # - web_cn_search: Chinese search results
 # - web_search: general web search (Tavily)
 # - web_fetch: direct fetch for a known URL
-# - web_read: article body / full-text reading
+# - web_read: article body / full-text reading (Jina -> Metaso -> spider)
 
 # Browser tool remains optional but useful for JS-heavy pages
 [tools.browser]

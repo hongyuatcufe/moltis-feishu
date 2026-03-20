@@ -413,7 +413,7 @@ timeout_seconds = 25              # HTTP request timeout
 # enabled = true
 
 # ── Web Read ──────────────────────────────────────────────────────────────────
-# Full-text reader with fallback chain (Jina → Metaso → Crawl4AI → Pinchtab).
+# Full-text reader with fallback chain (Jina → Metaso → spider).
 
 [tools.web.read]
 enabled = false
@@ -428,15 +428,16 @@ cache_ttl_minutes = 15
 # api_key = "..."
 # enabled = true
 
-# [tools.web.read.crawl4ai]
-# endpoint = "https://crawl4ai.example.com"
-# api_token = "..."
-# timeout_seconds = 60
+# [tools.web.read.metaso]
+# enabled = true
+# [[tools.web.read.metaso.accounts]]
+# name = "main"
+# api_key = "..."
+# enabled = true
 
-# [tools.web.read.pinchtab]
-# endpoint = "http://127.0.0.1:9867"
-# token = "..."
-# timeout_seconds = 60
+# [tools.web.read.spider]
+# enabled = true
+# timeout_seconds = 20
 
 # ── Browser Automation ────────────────────────────────────────────────────────
 # Full browser control via Chrome DevTools Protocol (CDP).

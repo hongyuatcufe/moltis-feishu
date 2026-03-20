@@ -1769,6 +1769,24 @@ impl Default for PinchtabConfig {
     }
 }
 
+/// Local Rust full-text reader powered by spider-rs.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct SpiderReadConfig {
+    pub enabled: bool,
+    /// HTTP request timeout in seconds.
+    pub timeout_seconds: u64,
+}
+
+impl Default for SpiderReadConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            timeout_seconds: 20,
+        }
+    }
+}
+
 /// Chinese web search tool configuration.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
@@ -1802,8 +1820,7 @@ pub struct WebReadConfig {
     pub enabled: bool,
     pub jina: ApiKeyProviderConfig,
     pub metaso: ApiKeyProviderConfig,
-    pub crawl4ai: Crawl4AiConfig,
-    pub pinchtab: PinchtabConfig,
+    pub spider: SpiderReadConfig,
     /// Minimum number of characters required to accept a backend response.
     pub min_chars: usize,
     /// Cache TTL in minutes (0 to disable).
@@ -1819,8 +1836,7 @@ impl Default for WebReadConfig {
             enabled: false,
             jina: ApiKeyProviderConfig::default(),
             metaso: ApiKeyProviderConfig::default(),
-            crawl4ai: Crawl4AiConfig::default(),
-            pinchtab: PinchtabConfig::default(),
+            spider: SpiderReadConfig::default(),
             min_chars: 300,
             cache_ttl_minutes: 15,
             ssrf_allowlist: Vec::new(),

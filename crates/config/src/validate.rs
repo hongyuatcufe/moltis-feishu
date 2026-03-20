@@ -221,22 +221,6 @@ fn build_schema_map() -> KnownKeys {
         ]))
     };
 
-    let crawl4ai = || {
-        Struct(HashMap::from([
-            ("endpoint", Leaf),
-            ("api_token", Leaf),
-            ("timeout_seconds", Leaf),
-        ]))
-    };
-
-    let pinchtab = || {
-        Struct(HashMap::from([
-            ("endpoint", Leaf),
-            ("token", Leaf),
-            ("timeout_seconds", Leaf),
-        ]))
-    };
-
     let web_cn_search = || {
         Struct(HashMap::from([
             ("enabled", Leaf),
@@ -253,8 +237,13 @@ fn build_schema_map() -> KnownKeys {
             ("enabled", Leaf),
             ("jina", api_key_provider()),
             ("metaso", api_key_provider()),
-            ("crawl4ai", crawl4ai()),
-            ("pinchtab", pinchtab()),
+            (
+                "spider",
+                Struct(HashMap::from([
+                    ("enabled", Leaf),
+                    ("timeout_seconds", Leaf),
+                ])),
+            ),
             ("min_chars", Leaf),
             ("cache_ttl_minutes", Leaf),
             ("ssrf_allowlist", Leaf),
