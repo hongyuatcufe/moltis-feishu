@@ -8475,6 +8475,7 @@ mod tests {
             agent_id: Some("writer".to_string()),
             memory_owner_agent_id: Some("main".to_string()),
             agent_mode: Some(AGENT_MODE_EPHEMERAL.to_string()),
+            node_id: None,
             version: 0,
         }
     }
@@ -9089,6 +9090,8 @@ mod tests {
             mcp_disabled: None,
             preview: None,
             agent_id: None,
+            memory_owner_agent_id: None,
+            agent_mode: None,
             node_id: None,
             version: 0,
         }
