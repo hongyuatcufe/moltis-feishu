@@ -1212,7 +1212,7 @@ mod tests {
             provider: ConfigSearchProvider::Tavily,
             tavily: moltis_config::schema::TavilyConfig {
                 api_key: Some(Secret::new("tvly-test-key".into())),
-                search_depth: moltis_config::schema::TavilySearchDepth::Advanced,
+                search_depth: TavilySearchDepth::Advanced,
                 include_answer: true,
                 include_domains: vec!["example.com".into()],
                 exclude_domains: vec![],
