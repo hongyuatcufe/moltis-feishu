@@ -89,6 +89,12 @@ jobs:
         run: |
           cargo build --release --target "$BUILD_TARGET" --features embedded-assets,embedded-wasm
 
+      - name: Smoke test binary
+        env:
+          BUILD_TARGET: ${{ matrix.target }}
+        run: |
+          "./target/$BUILD_TARGET/release/moltis" --version
+
       - name: Package standalone binary
         env:
           BUILD_TARGET: ${{ matrix.target }}

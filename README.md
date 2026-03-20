@@ -135,6 +135,7 @@ curl -LO "https://github.com/hongyuatcufe/moltis-feishu/releases/download/${VERS
 shasum -a 256 -c "moltis-${VERSION}-${TARGET}.tar.gz.sha256"
 tar xzf "moltis-${VERSION}-${TARGET}.tar.gz"
 cd "moltis-${VERSION}-${TARGET}"
+cp moltis.toml.example ~/.config/moltis/moltis.toml
 ./moltis
 ```
 
@@ -142,12 +143,14 @@ cd "moltis-${VERSION}-${TARGET}"
 
 - 这套二进制发布会用 `embedded-assets` 和 `embedded-wasm` 构建
 - 解压后可直接运行，不依赖额外的 `share/moltis/` 目录
+- 压缩包内包含 `moltis.toml.example`，可直接作为起始配置模板
 - 配置文件仍默认读取 `~/.config/moltis/moltis.toml`
 
 Notes:
 
 - These binaries are built with `embedded-assets` and `embedded-wasm`
 - You can run them directly after extracting the archive
+- Each archive includes `moltis.toml.example` as a starting config template
 - Config still defaults to `~/.config/moltis/moltis.toml`
 
 ### Maintainer Release Flow / 维护者发布流程

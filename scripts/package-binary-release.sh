@@ -40,6 +40,7 @@ mkdir -p "$stage_dir"
 cp "$binary_path" "${stage_dir}/moltis"
 cp README.md "${stage_dir}/README.md"
 cp LICENSE.md "${stage_dir}/LICENSE.md"
+cp examples/moltis.toml.example "${stage_dir}/moltis.toml.example"
 
 tar czf "$archive_path" -C "$dist_dir" "$package_root"
 (cd "$dist_dir" && shasum -a 256 "$(basename "$archive_path")" > "$(basename "$checksum_path")")
