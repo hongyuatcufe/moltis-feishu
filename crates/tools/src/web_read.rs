@@ -18,6 +18,38 @@ use crate::web_fetch::{decode_response_body, extract_content};
 const JINA_READER_URL: &str = "https://r.jina.ai/";
 const METASO_READER_URL: &str = "https://metaso.cn/api/v1/reader";
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum PreferredBackend {
+    Auto,
+    Jina,
+    Metaso,
+    Spider,
+}
+
+impl PreferredBackend {
+    fn parse(raw: Option<&str>) -> Result<Self> {
+        match raw.map(str::trim).filter(|value| !value.is_empty()) {
+            None => Ok(Self::Auto),
+            Some("auto") => Ok(Self::Auto),
+            Some("jina") => Ok(Self::Jina),
+            Some("metaso") => Ok(Self::Metaso),
+            Some("spider") => Ok(Self::Spider),
+            Some(other) => anyhow::bail!(
+                "invalid 'backend' parameter: {other} (expected one of: auto, jina, metaso, spider)"
+            ),
+        }
+    }
+
+    fn cache_key_value(self) -> &'static str {
+        match self {
+            Self::Auto => "auto",
+            Self::Jina => "jina",
+            Self::Metaso => "metaso",
+            Self::Spider => "spider",
+        }
+    }
+}
+
 /// Web page full-text fetcher with API-first fallback.
 pub struct WebReadTool {
     jina_key: Option<String>,
@@ -265,7 +297,12 @@ impl WebReadTool {
         Ok(content)
     }
 
-    async fn fetch(&self, url: &str, with_links: bool) -> Result<serde_json::Value> {
+    async fn fetch(
+        &self,
+        url: &str,
+        with_links: bool,
+        preferred_backend: PreferredBackend,
+    ) -> Result<serde_json::Value> {
         if !self.is_configured() {
             anyhow::bail!(
                 "No web_read backends configured. Set tools.web.read (jina/metaso/spider) \
@@ -276,44 +313,74 @@ impl WebReadTool {
         let parsed = Url::parse(url)?;
         ssrf_check(&parsed, &self.ssrf_allowlist).await?;
 
-        let cache_key = format!("{url}:with_links={with_links}");
+        let cache_key = format!(
+            "{url}:with_links={with_links}:backend={}",
+            preferred_backend.cache_key_value()
+        );
         if let Some(val) = self.cache_get(&cache_key) {
             return Ok(val);
         }
 
         let mut errors = Vec::new();
 
-        match self.try_jina(url, with_links).await {
-            Ok(content) => {
-                if content.len() >= self.min_chars {
-                    let result = fmt_result("jina", url, &content);
-                    self.cache_set(cache_key, result.clone());
-                    return Ok(result);
-                }
-            },
-            Err(e) => errors.push(format!("jina: {e}")),
+        if preferred_backend == PreferredBackend::Auto
+            || preferred_backend == PreferredBackend::Jina
+        {
+            match self.try_jina(url, with_links).await {
+                Ok(content) => {
+                    if content.len() >= self.min_chars {
+                        let result = fmt_result("jina", url, &content);
+                        self.cache_set(cache_key, result.clone());
+                        return Ok(result);
+                    }
+                    errors.push(format!(
+                        "jina: content too short ({} chars < min_chars {})",
+                        content.len(),
+                        self.min_chars
+                    ));
+                },
+                Err(e) => errors.push(format!("jina: {e}")),
+            }
         }
 
-        match self.try_metaso(url).await {
-            Ok(content) => {
-                if content.len() >= self.min_chars {
-                    let result = fmt_result("metaso", url, &content);
-                    self.cache_set(cache_key, result.clone());
-                    return Ok(result);
-                }
-            },
-            Err(e) => errors.push(format!("metaso: {e}")),
+        if preferred_backend == PreferredBackend::Auto
+            || preferred_backend == PreferredBackend::Metaso
+        {
+            match self.try_metaso(url).await {
+                Ok(content) => {
+                    if content.len() >= self.min_chars {
+                        let result = fmt_result("metaso", url, &content);
+                        self.cache_set(cache_key, result.clone());
+                        return Ok(result);
+                    }
+                    errors.push(format!(
+                        "metaso: content too short ({} chars < min_chars {})",
+                        content.len(),
+                        self.min_chars
+                    ));
+                },
+                Err(e) => errors.push(format!("metaso: {e}")),
+            }
         }
 
-        match self.try_spider(url).await {
-            Ok(content) => {
-                if content.len() >= self.min_chars {
-                    let result = fmt_result("spider", url, &content);
-                    self.cache_set(cache_key, result.clone());
-                    return Ok(result);
-                }
-            },
-            Err(e) => errors.push(format!("spider: {e}")),
+        if preferred_backend == PreferredBackend::Auto
+            || preferred_backend == PreferredBackend::Spider
+        {
+            match self.try_spider(url).await {
+                Ok(content) => {
+                    if content.len() >= self.min_chars {
+                        let result = fmt_result("spider", url, &content);
+                        self.cache_set(cache_key, result.clone());
+                        return Ok(result);
+                    }
+                    errors.push(format!(
+                        "spider: content too short ({} chars < min_chars {})",
+                        content.len(),
+                        self.min_chars
+                    ));
+                },
+                Err(e) => errors.push(format!("spider: {e}")),
+            }
         }
 
         anyhow::bail!("all backends failed: {}", errors.join("; "))
@@ -344,6 +411,12 @@ impl AgentTool for WebReadTool {
                     "type": "boolean",
                     "description": "Include navigation/sidebar link list in output (Jina backend only).",
                     "default": false
+                },
+                "backend": {
+                    "type": "string",
+                    "description": "Optional backend selector. Use 'auto' for fallback, or force one of: jina, metaso, spider.",
+                    "enum": ["auto", "jina", "metaso", "spider"],
+                    "default": "auto"
                 }
             }
         })
@@ -361,8 +434,10 @@ impl AgentTool for WebReadTool {
             .get("with_links")
             .and_then(|v| v.as_bool())
             .unwrap_or(false);
+        let preferred_backend =
+            PreferredBackend::parse(params.get("backend").and_then(serde_json::Value::as_str))?;
 
-        let result = self.fetch(url, with_links).await?;
+        let result = self.fetch(url, with_links, preferred_backend).await?;
         Ok(self.attach_warnings(result))
     }
 }
@@ -458,6 +533,20 @@ mod tests {
     }
 
     #[test]
+    fn schema_exposes_backend_selector() {
+        let mut cfg = WebReadConfig::default();
+        cfg.enabled = true;
+        let tool = WebReadTool::from_config_with_env_overrides(&cfg, &HashMap::new()).unwrap();
+        let schema = tool.parameters_schema();
+        let backend = &schema["properties"]["backend"];
+        assert_eq!(backend["default"], "auto");
+        let allowed = backend["enum"].as_array().unwrap();
+        assert!(allowed.iter().any(|v| v == "jina"));
+        assert!(allowed.iter().any(|v| v == "metaso"));
+        assert!(allowed.iter().any(|v| v == "spider"));
+    }
+
+    #[test]
     fn warnings_include_missing_keys() {
         let mut cfg = WebReadConfig::default();
         cfg.enabled = true;
@@ -525,6 +614,66 @@ mod tests {
             result["content"]
                 .as_str()
                 .is_some_and(|content| content.contains("Spider body"))
+        );
+    }
+
+    #[test]
+    fn backend_parser_accepts_known_values() {
+        assert_eq!(
+            PreferredBackend::parse(Some("auto")).unwrap(),
+            PreferredBackend::Auto
+        );
+        assert_eq!(
+            PreferredBackend::parse(Some("jina")).unwrap(),
+            PreferredBackend::Jina
+        );
+        assert_eq!(
+            PreferredBackend::parse(Some("metaso")).unwrap(),
+            PreferredBackend::Metaso
+        );
+        assert_eq!(
+            PreferredBackend::parse(Some("spider")).unwrap(),
+            PreferredBackend::Spider
+        );
+    }
+
+    #[test]
+    fn backend_parser_rejects_unknown_values() {
+        let err = PreferredBackend::parse(Some("bocha")).unwrap_err();
+        assert!(err.to_string().contains("invalid 'backend' parameter"));
+    }
+
+    #[tokio::test]
+    async fn explicit_spider_backend_reads_local_page_when_allowlisted() {
+        let mut cfg = WebReadConfig::default();
+        cfg.enabled = true;
+        cfg.spider.enabled = true;
+        cfg.min_chars = 5;
+        cfg.ssrf_allowlist = vec!["127.0.0.1/32".to_string()];
+
+        let mut server = mockito::Server::new_async().await;
+        let page_url = format!("{}/article", server.url());
+        let _mock = server
+            .mock("GET", "/article")
+            .with_status(200)
+            .with_header("content-type", "text/html; charset=utf-8")
+            .with_body(
+                "<html><body><article><h1>Hello</h1><p>Spider forced body</p></article></body></html>",
+            )
+            .create_async()
+            .await;
+
+        let tool = WebReadTool::from_config_with_env_overrides(&cfg, &HashMap::new()).unwrap();
+        let result = tool
+            .execute(serde_json::json!({ "url": page_url, "backend": "spider" }))
+            .await
+            .unwrap();
+
+        assert_eq!(result["backend"], "spider");
+        assert!(
+            result["content"]
+                .as_str()
+                .is_some_and(|content| content.contains("Spider forced body"))
         );
     }
 }
