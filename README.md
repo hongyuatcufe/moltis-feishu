@@ -1,18 +1,18 @@
 # Moltis Feishu Fork
 
-这个仓库是 `moltis` 的定制分支，面向飞书接入、中文检索和多 Agent 会话协作。
+这个仓库是 `moltis` 的定制分支，面向飞书接入、中文检索、Tavily 联网搜索和多 Agent 会话协作。
 
-This repository is a custom `moltis` fork focused on Feishu integration, Chinese web search, and multi-agent session workflows.
+This repository is a custom `moltis` fork focused on Feishu integration, Chinese web search, Tavily-based web search, and multi-agent session workflows.
 
 ## Upstream Base / 上游基线
 
 - 基于 `moltis` 上游代码。
 - 已合入 `v0.10.18` 及之后的部分 `upstream/main` 更新。
-- 当前工作分支：`feat/feishu-cn-tools-release`
+- 默认分支：`main`
 
 - Based on upstream `moltis`.
 - Includes `v0.10.18` and later updates merged from `upstream/main`.
-- Active branch: `feat/feishu-cn-tools-release`
+- Default branch: `main`
 
 ## What This Fork Adds / 本分支新增能力
 
@@ -37,8 +37,14 @@ This repository is a custom `moltis` fork focused on Feishu integration, Chinese
 - `web_cn_search` 工具：统一封装 Metaso、Bocha、Anspire、Jina。
 - `web_cn_search`: unified wrapper for Metaso, Bocha, Anspire, and Jina.
 
+- `web_search` 支持 Tavily，可作为通用联网检索入口。
+- `web_search` supports Tavily as a configurable general web-search provider.
+
 - `web_read` 工具：Jina、Metaso、Crawl4AI、PinchTab 回退链路。
 - `web_read`: fallback chain across Jina, Metaso, Crawl4AI, and PinchTab.
+
+- `web_fetch` 已修复中文页面抓取中的 GBK/GB18030 与 UTF-8 乱码问题。
+- `web_fetch` now handles Chinese pages more reliably, including GBK/GB18030 and UTF-8 decoding paths.
 
 - provider 缺 key 或单项配置错误时按组件降级，不阻塞其他已配置 provider。
 - Missing API keys or invalid provider-specific config degrade per component instead of blocking the rest.
@@ -58,7 +64,6 @@ This repository is a custom `moltis` fork focused on Feishu integration, Chinese
 ```bash
 git clone https://github.com/hongyuatcufe/moltis-feishu.git
 cd moltis-feishu
-git checkout feat/feishu-cn-tools-release
 cd crates/web/ui
 ./build.sh
 cd ../../..
@@ -85,18 +90,18 @@ moltis
 
 Example config file:
 
-- `examples/moltis.feishu-cn-tools.example.toml`
+- `examples/moltis.toml.example`
 
 推荐做法：
 
 Recommended workflow:
 
-1. 复制 `examples/moltis.feishu-cn-tools.example.toml` 到 `~/.config/moltis/moltis.toml`
-2. 填入你自己的 Feishu 和搜索工具密钥
+1. 复制 `examples/moltis.toml.example` 到 `~/.config/moltis/moltis.toml`
+2. 填入你自己的 Feishu、Tavily、Metaso、Bocha、Anspire、Jina 等密钥
 3. 按需启用或关闭各 provider
 
-1. Copy `examples/moltis.feishu-cn-tools.example.toml` to `~/.config/moltis/moltis.toml`
-2. Fill in your Feishu and search-tool secrets
+1. Copy `examples/moltis.toml.example` to `~/.config/moltis/moltis.toml`
+2. Fill in your Feishu, Tavily, Metaso, Bocha, Anspire, Jina, and related secrets
 3. Enable or disable providers as needed
 
 ## Minimal Config / 最小配置
@@ -132,6 +137,37 @@ api_key = "YOUR_BOCHA_API_KEY"
 enabled = true
 ```
 
+### `web_search` with Tavily
+
+```toml
+[tools.web.search]
+enabled = true
+provider = "tavily"
+max_results = 5
+timeout_seconds = 30
+cache_ttl_minutes = 15
+duckduckgo_fallback = false
+
+[tools.web.search.tavily]
+api_key = "YOUR_TAVILY_API_KEY"
+search_depth = "advanced"
+include_answer = true
+include_domains = []
+exclude_domains = []
+```
+
+### `web_fetch`
+
+```toml
+[tools.web.fetch]
+enabled = true
+max_chars = 50000
+timeout_seconds = 30
+cache_ttl_minutes = 15
+max_redirects = 3
+readability = true
+```
+
 ### `web_read`
 
 ```toml
@@ -153,6 +189,7 @@ enabled = true
 - `BOCHA_API_KEY`
 - `ANSPIRE_API_KEY`
 - `JINA_API_KEY`
+- `TAVILY_API_KEY`
 
 ## Startup And Verification / 启动与验证
 
@@ -180,13 +217,17 @@ Suggested smoke checks:
 2. 飞书图片或文件上传后，是否出现本地附件路径提示
 3. `/agent writer` 和 `/handoff writer 请继续处理` 是否生效
 4. `web_cn_search` 是否能在 provider key 正确时返回结果
-5. `web_read` 是否能读取指定 URL
+5. `web_search` 是否能通过 Tavily 返回结果
+6. `web_read` 是否能读取指定 URL
+7. `web_fetch` 是否能正确抓取中文页面全文而不乱码
 
 1. Verify Feishu text messages work both ways
 2. Upload an image or file and confirm the local attachment path appears
 3. Verify `/agent writer` and `/handoff writer please continue`
 4. Confirm `web_cn_search` returns results when provider keys are valid
-5. Confirm `web_read` can read a target URL
+5. Confirm `web_search` returns results through Tavily
+6. Confirm `web_read` can read a target URL
+7. Confirm `web_fetch` can fetch a Chinese page without mojibake
 
 如果 `config check` 报本地旧配置字段错误，请先清理已废弃字段，再重新检查。
 

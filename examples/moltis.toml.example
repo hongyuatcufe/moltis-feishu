@@ -1,0 +1,184 @@
+# Moltis Feishu + CN tools example config
+# 本文件是模板，请替换所有占位符，不要提交真实密钥。
+
+[server]
+bind = "127.0.0.1"
+port = 63386
+
+[identity]
+name = "Tom"
+emoji = "🤖"
+theme = "wise man"
+
+[user]
+name = "your-name"
+timezone = "Asia/Shanghai"
+
+[providers]
+offered = [
+  "openai-codex",
+  "openai",
+  "moonshot",
+  "minimax",
+  "zai",
+  "ollama",
+  "local-llm",
+]
+
+# Optional LLM provider examples
+[providers.minimax]
+enabled = true
+# api_key = "${MINIMAX_API_KEY}"
+models = ["MiniMax-M2.5"]
+
+[providers.moonshot]
+enabled = true
+# api_key = "${MOONSHOT_API_KEY}"
+models = ["kimi-k2.5"]
+
+[providers.ollama]
+enabled = true
+
+# Optional local model config
+# [providers.local-llm]
+# enabled = true
+
+# Feishu bot (WebSocket)
+[channels.feishu.main-bot]
+app_id = "cli_xxxxxxxxxxxxx"
+app_secret = "xxxxxxxxxxxxxxxx"
+base_url = "https://open.feishu.cn"
+# ws_endpoint = ""
+
+dm_policy = "open"
+group_policy = "open"
+mention_mode = "mention"
+allowlist = []
+
+agent_id = "main"
+allow_agent_switch = true
+session_auto_archive_days = 30
+
+# Optional fixed model for this bot
+# model = "minimax::MiniMax-M2.5"
+# model_provider = "minimax"
+
+[tools]
+agent_timeout_secs = 600
+agent_max_iterations = 25
+max_tool_result_bytes = 50000
+
+[tools.policy]
+allow = []
+deny = []
+
+# General web search via Tavily
+[tools.web.search]
+enabled = true
+provider = "tavily"
+max_results = 5
+timeout_seconds = 30
+cache_ttl_minutes = 15
+duckduckgo_fallback = false
+
+[tools.web.search.tavily]
+api_key = "YOUR_TAVILY_API_KEY"
+search_depth = "advanced"
+include_answer = true
+include_domains = []
+exclude_domains = []
+
+# Direct page fetch
+[tools.web.fetch]
+enabled = true
+max_chars = 50000
+timeout_seconds = 30
+cache_ttl_minutes = 15
+max_redirects = 3
+readability = true
+ssrf_allowlist = []
+
+# Chinese search wrapper
+[tools.web.cn_search]
+enabled = true
+timeout_seconds = 30
+
+[tools.web.cn_search.metaso]
+enabled = true
+[[tools.web.cn_search.metaso.accounts]]
+name = "metaso-main"
+api_key = "YOUR_METASO_API_KEY"
+enabled = true
+
+[tools.web.cn_search.bocha]
+enabled = true
+[[tools.web.cn_search.bocha.accounts]]
+name = "bocha-main"
+api_key = "YOUR_BOCHA_API_KEY"
+enabled = true
+
+[tools.web.cn_search.anspire]
+enabled = true
+[[tools.web.cn_search.anspire.accounts]]
+name = "anspire-main"
+api_key = "YOUR_ANSPIRE_API_KEY"
+enabled = true
+
+[tools.web.cn_search.jina]
+enabled = true
+[[tools.web.cn_search.jina.accounts]]
+name = "jina-main"
+api_key = "YOUR_JINA_API_KEY"
+enabled = true
+
+# Full-text reading fallback chain
+[tools.web.read]
+enabled = true
+min_chars = 300
+cache_ttl_minutes = 15
+ssrf_allowlist = []
+
+[tools.web.read.jina]
+enabled = true
+[[tools.web.read.jina.accounts]]
+name = "jina-main"
+api_key = "YOUR_JINA_API_KEY"
+enabled = true
+
+[tools.web.read.metaso]
+enabled = false
+[[tools.web.read.metaso.accounts]]
+name = "metaso-main"
+api_key = "YOUR_METASO_API_KEY"
+enabled = true
+
+[tools.web.read.crawl4ai]
+endpoint = ""
+api_token = ""
+timeout_seconds = 60
+
+[tools.web.read.pinchtab]
+endpoint = "http://127.0.0.1:9867"
+token = ""
+timeout_seconds = 60
+
+# Browser tool remains optional but useful for JS-heavy pages
+[tools.browser]
+enabled = true
+headless = true
+viewport_width = 2560
+viewport_height = 1440
+max_instances = 3
+idle_timeout_secs = 300
+navigation_timeout_ms = 30000
+allowed_domains = []
+
+# You can replace literal keys above with environment variables, for example:
+# api_key = "${TAVILY_API_KEY}"
+#
+# Supported search-related env vars:
+# TAVILY_API_KEY
+# METASO_API_KEY
+# BOCHA_API_KEY
+# ANSPIRE_API_KEY
+# JINA_API_KEY
