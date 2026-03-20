@@ -1,4 +1,8 @@
-use std::{collections::HashMap, sync::Arc, time::{Duration, Instant}};
+use std::{
+    collections::HashMap,
+    sync::Arc,
+    time::{Duration, Instant},
+};
 
 use {
     anyhow::{Context, Result},
@@ -9,12 +13,12 @@ use {
     tracing::{debug, info, warn},
 };
 
-use {
-    moltis_channels::{
-        ChannelEvent, ChannelEventSink,
-        gating::{DmPolicy, GroupPolicy, MentionMode, is_allowed},
-        message_log::{MessageLog, MessageLogEntry},
-        plugin::{ChannelAttachment, ChannelMessageKind, ChannelMessageMeta, ChannelReplyTarget, ChannelType},
+use moltis_channels::{
+    ChannelEvent, ChannelEventSink,
+    gating::{DmPolicy, GroupPolicy, MentionMode, is_allowed},
+    message_log::{MessageLog, MessageLogEntry},
+    plugin::{
+        ChannelAttachment, ChannelMessageKind, ChannelMessageMeta, ChannelReplyTarget, ChannelType,
     },
 };
 
@@ -70,7 +74,13 @@ struct EventChunk {
 }
 
 impl EventChunkCache {
-    fn insert(&mut self, message_id: &str, sum: usize, seq: usize, payload: Vec<u8>) -> Option<Vec<u8>> {
+    fn insert(
+        &mut self,
+        message_id: &str,
+        sum: usize,
+        seq: usize,
+        payload: Vec<u8>,
+    ) -> Option<Vec<u8>> {
         self.prune();
 
         if message_id.is_empty() || sum <= 1 {
@@ -80,10 +90,13 @@ impl EventChunkCache {
             return None;
         }
 
-        let entry = self.parts.entry(message_id.to_string()).or_insert_with(|| EventChunk {
-            chunks: vec![None; sum],
-            updated_at: Instant::now(),
-        });
+        let entry = self
+            .parts
+            .entry(message_id.to_string())
+            .or_insert_with(|| EventChunk {
+                chunks: vec![None; sum],
+                updated_at: Instant::now(),
+            });
 
         if entry.chunks.len() != sum {
             entry.chunks = vec![None; sum];
@@ -93,14 +106,13 @@ impl EventChunkCache {
         entry.chunks[seq] = Some(payload);
 
         if entry.chunks.iter().all(Option::is_some) {
-            let merged = entry
-                .chunks
-                .iter_mut()
-                .filter_map(Option::take)
-                .fold(Vec::new(), |mut acc, part| {
+            let merged = entry.chunks.iter_mut().filter_map(Option::take).fold(
+                Vec::new(),
+                |mut acc, part| {
                     acc.extend_from_slice(&part);
                     acc
-                });
+                },
+            );
             self.parts.remove(message_id);
             return Some(merged);
         }
@@ -110,7 +122,8 @@ impl EventChunkCache {
 
     fn prune(&mut self) {
         let ttl = Duration::from_secs(10);
-        self.parts.retain(|_, part| part.updated_at.elapsed() <= ttl);
+        self.parts
+            .retain(|_, part| part.updated_at.elapsed() <= ttl);
     }
 }
 
@@ -345,15 +358,22 @@ fn parse_service_id(connect_url: &str) -> i32 {
     url::Url::parse(connect_url)
         .ok()
         .and_then(|url| {
-            url.query_pairs()
-                .find_map(|(k, v)| if k == "service_id" { Some(v.into_owned()) } else { None })
+            url.query_pairs().find_map(|(k, v)| {
+                if k == "service_id" {
+                    Some(v.into_owned())
+                } else {
+                    None
+                }
+            })
         })
         .and_then(|v| v.parse::<i32>().ok())
         .unwrap_or_default()
 }
 
 async fn send_ping_frame(
-    ws: &mut tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>,
+    ws: &mut tokio_tungstenite::WebSocketStream<
+        tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
+    >,
     service_id: i32,
 ) -> Result<()> {
     if service_id <= 0 {
@@ -383,7 +403,9 @@ async fn send_ping_frame(
 }
 
 async fn handle_ws_binary(
-    ws: &mut tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>,
+    ws: &mut tokio_tungstenite::WebSocketStream<
+        tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
+    >,
     account_id: &str,
     state: &AccountState,
     bin: &[u8],
@@ -405,7 +427,7 @@ async fn handle_ws_binary(
             if msg_type == "pong" {
                 debug!(account_id, "feishu ws received pong frame");
             }
-        }
+        },
         FRAME_METHOD_DATA => {
             let msg_type = header_value(&frame.headers, "type").unwrap_or_default();
             if msg_type != "event" {
@@ -426,30 +448,39 @@ async fn handle_ws_binary(
                 return Ok(());
             };
 
-            let code = match handle_event_payload(account_id, state, &payload, message_log, event_sink).await {
-                Ok(()) => 200,
-                Err(e) => {
-                    warn!(account_id, error = %e, "failed to process feishu event payload");
-                    500
-                }
-            };
+            let code =
+                match handle_event_payload(account_id, state, &payload, message_log, event_sink)
+                    .await
+                {
+                    Ok(()) => 200,
+                    Err(e) => {
+                        warn!(account_id, error = %e, "failed to process feishu event payload");
+                        500
+                    },
+                };
 
             send_event_ack(ws, &frame, code).await?;
-        }
-        _ => {}
+        },
+        _ => {},
     }
 
     Ok(())
 }
 
 fn header_value<'a>(headers: &'a [FeishuHeader], key: &str) -> Option<&'a str> {
-    headers
-        .iter()
-        .find_map(|h| if h.key == key { Some(h.value.as_str()) } else { None })
+    headers.iter().find_map(|h| {
+        if h.key == key {
+            Some(h.value.as_str())
+        } else {
+            None
+        }
+    })
 }
 
 async fn send_event_ack(
-    ws: &mut tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>,
+    ws: &mut tokio_tungstenite::WebSocketStream<
+        tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
+    >,
     frame: &FeishuFrame,
     code: u16,
 ) -> Result<()> {
@@ -492,7 +523,9 @@ async fn handle_event_payload(
 }
 
 async fn handle_ws_text(
-    ws: &mut tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>,
+    ws: &mut tokio_tungstenite::WebSocketStream<
+        tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
+    >,
     account_id: &str,
     state: &AccountState,
     text: &str,
@@ -518,7 +551,9 @@ async fn handle_ws_text(
                 "status": 0,
             });
             let _ = ws
-                .send(tokio_tungstenite::tungstenite::Message::Text(ack.to_string().into()))
+                .send(tokio_tungstenite::tungstenite::Message::Text(
+                    ack.to_string().into(),
+                ))
                 .await;
         }
     }
@@ -534,14 +569,20 @@ async fn handle_event_value(
     event_sink: &Option<Arc<dyn ChannelEventSink>>,
 ) -> Result<()> {
     let header = value.get("header").cloned().unwrap_or_default();
-    let event_type = header.get("event_type").and_then(|v| v.as_str()).unwrap_or("");
+    let event_type = header
+        .get("event_type")
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
     if event_type != "im.message.receive_v1" {
         return Ok(());
     }
 
     let event = value.get("event").cloned().unwrap_or_default();
     let message = event.get("message").cloned().unwrap_or_default();
-    let chat_id = message.get("chat_id").and_then(|v| v.as_str()).unwrap_or("");
+    let chat_id = message
+        .get("chat_id")
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
     let message_id = message
         .get("message_id")
         .and_then(|v| v.as_str())
@@ -697,14 +738,8 @@ async fn handle_event_value(
     let mut attachments = Vec::new();
     if message_type == "image" {
         if let Some(key) = content_json.get("image_key").and_then(|v| v.as_str()) {
-            if let Ok(att) = download_message_resource(
-                state,
-                message_id.as_deref(),
-                key,
-                "image",
-                None,
-            )
-            .await
+            if let Ok(att) =
+                download_message_resource(state, message_id.as_deref(), key, "image", None).await
             {
                 attachments.push(att);
             }
@@ -717,14 +752,9 @@ async fn handle_event_value(
                 .and_then(|v| v.as_str())
                 .map(str::trim)
                 .filter(|v| !v.is_empty());
-            if let Ok(att) = download_message_resource(
-                state,
-                message_id.as_deref(),
-                key,
-                "file",
-                file_name,
-            )
-            .await
+            if let Ok(att) =
+                download_message_resource(state, message_id.as_deref(), key, "file", file_name)
+                    .await
             {
                 attachments.push(att);
             }
@@ -989,5 +1019,4 @@ mod tests {
             Some("report-final.docx")
         );
     }
-
 }

@@ -1,13 +1,16 @@
 use std::{
     collections::HashMap,
-    sync::OnceLock,
-    sync::Mutex,
+    sync::{Mutex, OnceLock},
     time::{Duration, Instant},
 };
 
-use encoding_rs::{Encoding, GB18030, UTF_8};
-use regex::Regex;
-use {async_trait::async_trait, tracing::debug, url::Url};
+use {
+    async_trait::async_trait,
+    encoding_rs::{Encoding, GB18030, UTF_8},
+    regex::Regex,
+    tracing::debug,
+    url::Url,
+};
 
 use crate::error::Error;
 
@@ -208,12 +211,12 @@ impl WebFetchTool {
 
 fn decode_response_body(headers: &reqwest::header::HeaderMap, body: &[u8]) -> String {
     if let Some(encoding) = detect_charset_from_headers(headers) {
-        let (decoded, _, _) = encoding.decode(body);
+        let (decoded, ..) = encoding.decode(body);
         return decoded.into_owned();
     }
 
     if let Some(encoding) = detect_charset_from_html(body) {
-        let (decoded, _, _) = encoding.decode(body);
+        let (decoded, ..) = encoding.decode(body);
         return decoded.into_owned();
     }
 
@@ -224,7 +227,7 @@ fn decode_response_body(headers: &reqwest::header::HeaderMap, body: &[u8]) -> St
             if !had_errors {
                 return decoded.into_owned();
             }
-            let (decoded, _, _) = GB18030.decode(body);
+            let (decoded, ..) = GB18030.decode(body);
             decoded.into_owned()
         },
     }
@@ -591,7 +594,7 @@ mod tests {
             reqwest::header::CONTENT_TYPE,
             reqwest::header::HeaderValue::from_static("text/html; charset=gbk"),
         );
-        let (body, _, _) = GB18030.encode("教育热点");
+        let (body, ..) = GB18030.encode("教育热点");
 
         let decoded = decode_response_body(&headers, body.as_ref());
         assert_eq!(decoded, "教育热点");
@@ -601,7 +604,7 @@ mod tests {
     fn test_decode_response_body_uses_html_meta_charset() {
         let headers = reqwest::header::HeaderMap::new();
         let html = r#"<html><head><meta charset="gbk"></head><body>教育热点</body></html>"#;
-        let (body, _, _) = GB18030.encode(html);
+        let (body, ..) = GB18030.encode(html);
 
         let decoded = decode_response_body(&headers, body.as_ref());
         assert!(decoded.contains("教育热点"));

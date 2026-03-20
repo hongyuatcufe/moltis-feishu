@@ -9,8 +9,7 @@ use {
 use {
     moltis_channels::{
         ChannelAttachment, ChannelEvent, ChannelEventSink, ChannelMessageMeta, ChannelReplyTarget,
-        ChannelType,
-        Error as ChannelError, Result as ChannelResult,
+        ChannelType, Error as ChannelError, Result as ChannelResult,
     },
     moltis_sessions::metadata::SqliteSessionMetadata,
 };
@@ -65,10 +64,8 @@ async fn channel_config_u64(
         .await
         .and_then(|cfg| {
             cfg.get(key).and_then(|v| {
-                v.as_u64().or_else(|| {
-                    v.as_str()
-                        .and_then(|raw| raw.trim().parse::<u64>().ok())
-                })
+                v.as_u64()
+                    .or_else(|| v.as_str().and_then(|raw| raw.trim().parse::<u64>().ok()))
             })
         })
 }
@@ -156,10 +153,7 @@ fn rewrite_for_shell_mode(text: &str) -> Option<String> {
 }
 
 fn is_image_media_type(media_type: &str) -> bool {
-    media_type
-        .trim()
-        .to_ascii_lowercase()
-        .starts_with("image/")
+    media_type.trim().to_ascii_lowercase().starts_with("image/")
 }
 
 fn attachment_placeholder_text(has_images: bool, has_non_images: bool) -> &'static str {
@@ -206,7 +200,7 @@ async fn persist_non_image_attachments(
                     saved.media_type,
                     saved.size_bytes
                 ));
-            }
+            },
             Err(error) => {
                 warn!(
                     session_key,
@@ -214,7 +208,7 @@ async fn persist_non_image_attachments(
                     error = %error,
                     "failed to persist non-image attachment"
                 );
-            }
+            },
         }
     }
     saved_paths
@@ -271,7 +265,10 @@ fn parse_handoff_args(args: &str) -> ChannelResult<(String, String)> {
         .next()
         .ok_or_else(|| ChannelError::invalid_input("usage: /handoff <agent_id> [note]"))?;
 
-    Ok((selector.to_string(), tokens.collect::<Vec<_>>().join(" ").trim().to_string()))
+    Ok((
+        selector.to_string(),
+        tokens.collect::<Vec<_>>().join(" ").trim().to_string(),
+    ))
 }
 
 fn truncate_handoff_text(text: &str, max_chars: usize) -> String {
@@ -347,7 +344,7 @@ async fn build_sanitized_handoff_summary(
                 if let Some(text) = extract_message_text_for_handoff(&msg) {
                     items.push(format!("User asked: {}", truncate_handoff_text(&text, 180)));
                 }
-            }
+            },
             "assistant" => {
                 if let Some(text) = extract_message_text_for_handoff(&msg)
                     && let Some(sanitized) = sanitize_assistant_handoff_text(&text)
@@ -357,7 +354,7 @@ async fn build_sanitized_handoff_summary(
                         truncate_handoff_text(&sanitized, 180)
                     ));
                 }
-            }
+            },
             "tool_result" => {
                 let tool_name = msg
                     .get("tool_name")
@@ -369,10 +366,14 @@ async fn build_sanitized_handoff_summary(
                     .unwrap_or(false);
                 items.push(format!(
                     "Tool result: {tool_name} {}",
-                    if success { "succeeded" } else { "failed" }
+                    if success {
+                        "succeeded"
+                    } else {
+                        "failed"
+                    }
                 ));
-            }
-            _ => {}
+            },
+            _ => {},
         }
     }
     if items.is_empty() {
@@ -419,7 +420,7 @@ fn parse_sessions_command_args(args: &str) -> ChannelResult<SessionsCommand> {
             } else {
                 Ok(SessionsCommand::Unarchive(n))
             }
-        }
+        },
         n_str => {
             if parts.next().is_some() {
                 return Err(ChannelError::invalid_input(
@@ -433,7 +434,7 @@ fn parse_sessions_command_args(args: &str) -> ChannelResult<SessionsCommand> {
                 return Err(ChannelError::invalid_input("session number must be >= 1"));
             }
             Ok(SessionsCommand::Switch(n))
-        }
+        },
     }
 }
 
@@ -466,10 +467,9 @@ async fn auto_archive_stale_channel_sessions(
     reply_to: &ChannelReplyTarget,
     current_session_key: &str,
 ) -> usize {
-    let auto_archive_days =
-        channel_config_u64(state, reply_to, "session_auto_archive_days")
-            .await
-            .unwrap_or(DEFAULT_AUTO_ARCHIVE_DAYS);
+    let auto_archive_days = channel_config_u64(state, reply_to, "session_auto_archive_days")
+        .await
+        .unwrap_or(DEFAULT_AUTO_ARCHIVE_DAYS);
     if auto_archive_days == 0 {
         return 0;
     }
@@ -493,7 +493,11 @@ async fn auto_archive_stale_channel_sessions(
         {
             continue;
         }
-        if session_metadata.set_archived(&session.key, true).await.is_ok() {
+        if session_metadata
+            .set_archived(&session.key, true)
+            .await
+            .is_ok()
+        {
             archived_count += 1;
         }
     }
@@ -558,11 +562,7 @@ async fn maybe_apply_handoff_context(
             .to_string(),
     );
 
-    format!(
-        "{}\n\nUser message:\n{}",
-        prefix.join("\n"),
-        message_text
-    )
+    format!("{}\n\nUser message:\n{}", prefix.join("\n"), message_text)
 }
 
 fn start_channel_typing_loop(
@@ -714,34 +714,34 @@ impl ChannelEventSink for GatewayChannelEventSink {
                 session_meta
                     .set_channel_binding(&session_key, Some(binding_json))
                     .await;
-            if let Some(entry) = session_meta.get(&session_key).await
-                && entry
-                    .agent_id
-                    .as_deref()
-                    .map(str::trim)
-                    .is_none_or(|value| value.is_empty())
-            {
-                let channel_agent = channel_config_string(state, &reply_to, "agent_id").await;
-                let default_agent = if let Some(agent_id) = channel_agent {
-                    agent_id
-                } else if let Some(ref store) = state.services.agent_persona_store {
-                    store
-                        .default_id()
-                        .await
-                        .unwrap_or_else(|_| "main".to_string())
-                } else {
-                    "main".to_string()
-                };
-                let _ = session_meta
-                    .set_agent_id(&session_key, Some(&default_agent))
-                    .await;
-                let _ = session_meta
-                    .set_memory_owner_agent_id(&session_key, Some(&default_agent))
-                    .await;
-                let _ = session_meta
-                    .set_agent_mode(&session_key, Some(AGENT_MODE_ATTACHED))
-                    .await;
-            }
+                if let Some(entry) = session_meta.get(&session_key).await
+                    && entry
+                        .agent_id
+                        .as_deref()
+                        .map(str::trim)
+                        .is_none_or(|value| value.is_empty())
+                {
+                    let channel_agent = channel_config_string(state, &reply_to, "agent_id").await;
+                    let default_agent = if let Some(agent_id) = channel_agent {
+                        agent_id
+                    } else if let Some(ref store) = state.services.agent_persona_store {
+                        store
+                            .default_id()
+                            .await
+                            .unwrap_or_else(|_| "main".to_string())
+                    } else {
+                        "main".to_string()
+                    };
+                    let _ = session_meta
+                        .set_agent_id(&session_key, Some(&default_agent))
+                        .await;
+                    let _ = session_meta
+                        .set_memory_owner_agent_id(&session_key, Some(&default_agent))
+                        .await;
+                    let _ = session_meta
+                        .set_agent_mode(&session_key, Some(AGENT_MODE_ATTACHED))
+                        .await;
+                }
             }
 
             // Channel platforms do not expose bot read receipts. Use inbound
@@ -1604,8 +1604,7 @@ impl ChannelEventSink for GatewayChannelEventSink {
 
                 // Assign a model to the new session: prefer the channel's
                 // configured model, fall back to the first registered model.
-                let channel_model =
-                    channel_config_string(state, &reply_to, "model").await;
+                let channel_model = channel_config_string(state, &reply_to, "model").await;
 
                 let models_val = state.services.model.list().await.ok();
                 let models = models_val.as_ref().and_then(|v| v.as_array());
@@ -1792,15 +1791,14 @@ impl ChannelEventSink for GatewayChannelEventSink {
                             ));
                         }
                         if auto_archived > 0 {
-                            lines.push(format!(
-                                "\nAuto-archived {auto_archived} stale session(s)."
-                            ));
+                            lines
+                                .push(format!("\nAuto-archived {auto_archived} stale session(s)."));
                         }
                         lines.push("\nUse /sessions N to switch.".to_string());
                         lines.push("Use /sessions archive N to archive a session.".to_string());
                         lines.push("Use /sessions unarchive N to restore a session.".to_string());
                         Ok(lines.join("\n"))
-                    }
+                    },
                     SessionsCommand::Archive(n) => {
                         if n > sessions.len() {
                             return Err(ChannelError::invalid_input(format!(
@@ -1823,7 +1821,7 @@ impl ChannelEventSink for GatewayChannelEventSink {
                             .map_err(|e| ChannelError::external("archive session", e))?;
                         let label = target.label.as_deref().unwrap_or(&target.key);
                         Ok(format!("Archived: {label}"))
-                    }
+                    },
                     SessionsCommand::Unarchive(n) => {
                         if n > sessions.len() {
                             return Err(ChannelError::invalid_input(format!(
@@ -1841,7 +1839,7 @@ impl ChannelEventSink for GatewayChannelEventSink {
                             .map_err(|e| ChannelError::external("unarchive session", e))?;
                         let label = target.label.as_deref().unwrap_or(&target.key);
                         Ok(format!("Unarchived: {label}"))
-                    }
+                    },
                     SessionsCommand::Switch(n) => {
                         if n > sessions.len() {
                             return Err(ChannelError::invalid_input(format!(
@@ -1890,15 +1888,14 @@ impl ChannelEventSink for GatewayChannelEventSink {
                         .await;
 
                         Ok(format!("Switched to: {label}"))
-                    }
+                    },
                 }
             },
             "agent" => {
                 if reply_to.channel_type == ChannelType::Feishu {
-                    let allow_switch =
-                        channel_config_bool(state, &reply_to, "allow_agent_switch")
-                            .await
-                            .unwrap_or(false);
+                    let allow_switch = channel_config_bool(state, &reply_to, "allow_agent_switch")
+                        .await
+                        .unwrap_or(false);
                     if !allow_switch {
                         return Err(ChannelError::invalid_input(
                             "agent switching is disabled for this bot",
@@ -2016,10 +2013,9 @@ impl ChannelEventSink for GatewayChannelEventSink {
             },
             "handoff" => {
                 if reply_to.channel_type == ChannelType::Feishu {
-                    let allow_switch =
-                        channel_config_bool(state, &reply_to, "allow_agent_switch")
-                            .await
-                            .unwrap_or(false);
+                    let allow_switch = channel_config_bool(state, &reply_to, "allow_agent_switch")
+                        .await
+                        .unwrap_or(false);
                     if !allow_switch {
                         return Err(ChannelError::invalid_input(
                             "agent switching is disabled for this bot",
@@ -2041,7 +2037,8 @@ impl ChannelEventSink for GatewayChannelEventSink {
                     .list()
                     .await
                     .map_err(|e| ChannelError::external("listing agents", e))?;
-                let current_agent = current_agent_id_for_session(state, session_metadata, &session_key).await;
+                let current_agent =
+                    current_agent_id_for_session(state, session_metadata, &session_key).await;
 
                 if args.is_empty() {
                     let mut lines = Vec::new();
@@ -2065,9 +2062,7 @@ impl ChannelEventSink for GatewayChannelEventSink {
                             marker,
                         ));
                     }
-                    lines.push(
-                        "\nUse /handoff <id> [note]".to_string(),
-                    );
+                    lines.push("\nUse /handoff <id> [note]".to_string());
                     return Ok(lines.join("\n"));
                 }
 
@@ -2098,7 +2093,9 @@ impl ChannelEventSink for GatewayChannelEventSink {
                     .await;
                 if let Some(source_entry) = session_metadata.get(&session_key).await {
                     if source_entry.model.is_some() {
-                        session_metadata.set_model(&new_key, source_entry.model).await;
+                        session_metadata
+                            .set_model(&new_key, source_entry.model)
+                            .await;
                     }
                     if source_entry.project_id.is_some() {
                         session_metadata
@@ -2166,7 +2163,12 @@ impl ChannelEventSink for GatewayChannelEventSink {
                     };
                     if let Ok(payload) = serde_json::to_string(&packet) {
                         let _ = state_store
-                            .set(&target_session_key, HANDOFF_NAMESPACE, HANDOFF_PENDING_KEY, &payload)
+                            .set(
+                                &target_session_key,
+                                HANDOFF_NAMESPACE,
+                                HANDOFF_PENDING_KEY,
+                                &payload,
+                            )
                             .await;
                     }
                 }
@@ -2178,12 +2180,9 @@ impl ChannelEventSink for GatewayChannelEventSink {
                 };
                 Ok(format!(
                     "Handoff to {} [{}]. Session: {}{}",
-                    chosen.name,
-                    chosen.id,
-                    target_session_key,
-                    note_suffix
+                    chosen.name, chosen.id, target_session_key, note_suffix
                 ))
-            }
+            },
             "model" => {
                 let models_val = state
                     .services
@@ -2583,7 +2582,6 @@ mod tests {
     use std::sync::Arc;
 
     use {
-        async_trait::async_trait,
         super::*,
         crate::{
             agent_persona::AgentPersonaStore,
@@ -2592,6 +2590,7 @@ mod tests {
             services::GatewayServices,
             state::GatewayState,
         },
+        async_trait::async_trait,
         moltis_channels::ChannelType,
         moltis_service_traits::{ChannelService, NoopChannelService, ServiceResult},
         moltis_sessions::{
@@ -2776,10 +2775,8 @@ mod tests {
         let pool = sqlite_pool().await;
         let metadata = Arc::new(SqliteSessionMetadata::new(pool.clone()));
         let state_store = Arc::new(SessionStateStore::new(pool.clone()));
-        let session_store_dir = std::env::temp_dir().join(format!(
-            "moltis-feishu-test-{}",
-            uuid::Uuid::new_v4()
-        ));
+        let session_store_dir =
+            std::env::temp_dir().join(format!("moltis-feishu-test-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&session_store_dir).unwrap();
         let session_store = Arc::new(SessionStore::new(session_store_dir));
         let agent_store = Arc::new(AgentPersonaStore::new(pool.clone()));
@@ -2804,7 +2801,10 @@ mod tests {
             .upsert(&session_key, Some("Feishu 1".to_string()))
             .await
             .unwrap();
-        metadata.set_agent_id(&session_key, Some("main")).await.unwrap();
+        metadata
+            .set_agent_id(&session_key, Some("main"))
+            .await
+            .unwrap();
         metadata
             .set_memory_owner_agent_id(&session_key, Some("main"))
             .await
@@ -2814,7 +2814,15 @@ mod tests {
             .await
             .unwrap();
 
-        (sink, state, metadata, state_store, session_store, agent_store, reply_to)
+        (
+            sink,
+            state,
+            metadata,
+            state_store,
+            session_store,
+            agent_store,
+            reply_to,
+        )
     }
 
     #[test]
@@ -2926,9 +2934,13 @@ mod tests {
             data: b"%PDF-test".to_vec(),
         }];
 
-        let saved =
-            persist_non_image_attachments(&state, "feishu:main-bot:oc_test_chat", &reply_to, &attachments)
-                .await;
+        let saved = persist_non_image_attachments(
+            &state,
+            "feishu:main-bot:oc_test_chat",
+            &reply_to,
+            &attachments,
+        )
+        .await;
 
         assert!(saved.is_empty());
     }
@@ -2939,8 +2951,9 @@ mod tests {
         let pool = SqlitePool::connect("sqlite::memory:").await.unwrap();
         init_attachment_tables(&pool).await;
         let store = Arc::new(AttachmentStore::new(pool.clone(), dir.path().to_path_buf()));
-        let state =
-            test_state_with_services(GatewayServices::noop().with_attachment_store(Arc::clone(&store)));
+        let state = test_state_with_services(
+            GatewayServices::noop().with_attachment_store(Arc::clone(&store)),
+        );
         let reply_to = test_reply_target();
         let attachments = vec![
             ChannelAttachment {
@@ -2955,9 +2968,13 @@ mod tests {
             },
         ];
 
-        let saved =
-            persist_non_image_attachments(&state, "feishu:main-bot:oc_test_chat", &reply_to, &attachments)
-                .await;
+        let saved = persist_non_image_attachments(
+            &state,
+            "feishu:main-bot:oc_test_chat",
+            &reply_to,
+            &attachments,
+        )
+        .await;
 
         assert_eq!(saved.len(), 1);
         assert!(saved[0].contains("quarterly-plan.pdf -> "));
@@ -2971,12 +2988,11 @@ mod tests {
         .unwrap();
         assert_eq!(stored_name, "quarterly-plan.pdf");
 
-        let stored_paths: Vec<String> = sqlx::query_scalar(
-            "SELECT storage_path FROM attachment_blobs ORDER BY storage_path",
-        )
-        .fetch_all(&pool)
-        .await
-        .unwrap();
+        let stored_paths: Vec<String> =
+            sqlx::query_scalar("SELECT storage_path FROM attachment_blobs ORDER BY storage_path")
+                .fetch_all(&pool)
+                .await
+                .unwrap();
         assert_eq!(stored_paths.len(), 1);
         assert!(dir.path().join(&stored_paths[0]).exists());
     }
@@ -3008,8 +3024,14 @@ mod tests {
             },
         ];
 
-        assert_eq!(resolve_agent_selector(&agents, "writer").unwrap().id, "writer");
-        assert_eq!(resolve_agent_selector(&agents, "WRITER").unwrap().id, "writer");
+        assert_eq!(
+            resolve_agent_selector(&agents, "writer").unwrap().id,
+            "writer"
+        );
+        assert_eq!(
+            resolve_agent_selector(&agents, "WRITER").unwrap().id,
+            "writer"
+        );
         assert!(resolve_agent_selector(&agents, "2").is_err());
         assert!(resolve_agent_selector(&agents, "alice").is_err());
         assert!(resolve_agent_selector(&agents, "Bob").is_err());
@@ -3052,7 +3074,10 @@ mod tests {
             test_command_sink().await;
         let session_key = default_channel_session_key(&reply_to);
 
-        let response = sink.dispatch_command("agent writer", reply_to.clone()).await.unwrap();
+        let response = sink
+            .dispatch_command("agent writer", reply_to.clone())
+            .await
+            .unwrap();
 
         assert_eq!(
             response,
@@ -3069,7 +3094,10 @@ mod tests {
                 &reply_to.chat_id,
             )
             .await;
-        assert!(active.is_none(), "plain /agent should not create or remap sessions");
+        assert!(
+            active.is_none(),
+            "plain /agent should not create or remap sessions"
+        );
     }
 
     #[tokio::test]
@@ -3087,7 +3115,10 @@ mod tests {
             .unwrap();
         metadata.set_agent_mode(&session_key, None).await.unwrap();
 
-        let response = sink.dispatch_command("agent main", reply_to.clone()).await.unwrap();
+        let response = sink
+            .dispatch_command("agent main", reply_to.clone())
+            .await
+            .unwrap();
 
         assert_eq!(
             response,
@@ -3137,20 +3168,35 @@ mod tests {
 
         let source_session = metadata.get(&source_session_key).await.unwrap();
         assert_eq!(source_session.agent_id.as_deref(), Some("main"));
-        assert_eq!(source_session.memory_owner_agent_id.as_deref(), Some("main"));
+        assert_eq!(
+            source_session.memory_owner_agent_id.as_deref(),
+            Some("main")
+        );
 
         let target_session = metadata.get(&target_session_key).await.unwrap();
         assert_eq!(target_session.agent_id.as_deref(), Some("writer"));
-        assert_eq!(target_session.memory_owner_agent_id.as_deref(), Some("writer"));
-        assert_eq!(target_session.agent_mode.as_deref(), Some(AGENT_MODE_ATTACHED));
+        assert_eq!(
+            target_session.memory_owner_agent_id.as_deref(),
+            Some("writer")
+        );
+        assert_eq!(
+            target_session.agent_mode.as_deref(),
+            Some(AGENT_MODE_ATTACHED)
+        );
         let binding_json = serde_json::to_string(&reply_to).unwrap();
-        assert_eq!(target_session.channel_binding.as_deref(), Some(binding_json.as_str()));
+        assert_eq!(
+            target_session.channel_binding.as_deref(),
+            Some(binding_json.as_str())
+        );
 
         let pending = state_store
             .get(&target_session_key, HANDOFF_NAMESPACE, HANDOFF_PENDING_KEY)
             .await
             .unwrap();
-        assert!(pending.is_some(), "handoff packet should be queued for the new session");
+        assert!(
+            pending.is_some(),
+            "handoff packet should be queued for the new session"
+        );
 
         let first_message =
             maybe_apply_handoff_context(&state, &target_session_key, "Please continue".to_string())
@@ -3168,7 +3214,10 @@ mod tests {
             .get(&target_session_key, HANDOFF_NAMESPACE, HANDOFF_PENDING_KEY)
             .await
             .unwrap();
-        assert!(after_first.is_none(), "handoff packet should be consumed after first use");
+        assert!(
+            after_first.is_none(),
+            "handoff packet should be consumed after first use"
+        );
 
         let second_message =
             maybe_apply_handoff_context(&state, &target_session_key, "Second turn".to_string())

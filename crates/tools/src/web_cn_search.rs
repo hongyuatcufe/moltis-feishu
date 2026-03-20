@@ -1,13 +1,15 @@
 use std::{
     collections::HashMap,
-    sync::{atomic::{AtomicUsize, Ordering}, Arc},
+    sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering},
+    },
     time::Duration,
 };
 
 use {anyhow::Result, async_trait::async_trait, secrecy::ExposeSecret, tracing::warn};
 
-use moltis_agents::tool_registry::AgentTool;
-use moltis_config::schema::WebCnSearchConfig;
+use {moltis_agents::tool_registry::AgentTool, moltis_config::schema::WebCnSearchConfig};
 
 /// API endpoints.
 const METASO_SEARCH_URL: &str = "https://metaso.cn/api/v1/search";
@@ -19,20 +21,31 @@ const JINA_SEARCH_URL: &str = "https://s.jina.ai/";
 
 /// Domain trust tiers (edu_hss profile).
 const HIGH_TRUST: &[&str] = &[
-    "gov.cn", "moe.gov.cn",
-    "people.com.cn", "news.cn", "xinhuanet.com",
+    "gov.cn",
+    "moe.gov.cn",
+    "people.com.cn",
+    "news.cn",
+    "xinhuanet.com",
     "gmw.cn",
     "qstheory.cn",
     "jyb.cn",
-    "edu.cn", "cnki.net", "cssn.cn", "cass.cn",
+    "edu.cn",
+    "cnki.net",
+    "cssn.cn",
+    "cass.cn",
 ];
 const MEDIUM_TRUST: &[&str] = &[
-    "thepaper.cn", "caixin.com", "guancha.cn",
+    "thepaper.cn",
+    "caixin.com",
+    "guancha.cn",
     "chinanews.com.cn",
     "jyb.com.cn",
 ];
 const LOW_TRUST: &[&str] = &[
-    "baijiahao.baidu.com", "sohu.com", "toutiao.com", "csdn.net",
+    "baijiahao.baidu.com",
+    "sohu.com",
+    "toutiao.com",
+    "csdn.net",
     "mp.weixin.qq.com",
 ];
 
@@ -49,7 +62,10 @@ impl AccountPool {
             .filter(|e| e.enabled && !e.api_key.expose_secret().trim().is_empty())
             .map(|e| (e.name.clone(), e.api_key.expose_secret().to_string()))
             .collect();
-        Self { keys, counter: AtomicUsize::new(0) }
+        Self {
+            keys,
+            counter: AtomicUsize::new(0),
+        }
     }
 
     fn from_env(name: &str, api_key: &str) -> Self {
@@ -57,7 +73,10 @@ impl AccountPool {
         if !api_key.trim().is_empty() {
             keys.push((name.to_string(), api_key.to_string()));
         }
-        Self { keys, counter: AtomicUsize::new(0) }
+        Self {
+            keys,
+            counter: AtomicUsize::new(0),
+        }
     }
 
     fn is_empty(&self) -> bool {
@@ -141,30 +160,10 @@ impl WebCnSearchTool {
             Arc::new(AccountPool::new(&[]))
         };
 
-        let metaso = Self::merge_env_key(
-            metaso,
-            env_overrides,
-            "METASO_API_KEY",
-            "metaso",
-        );
-        let bocha = Self::merge_env_key(
-            bocha,
-            env_overrides,
-            "BOCHA_API_KEY",
-            "bocha",
-        );
-        let anspire = Self::merge_env_key(
-            anspire,
-            env_overrides,
-            "ANSPIRE_API_KEY",
-            "anspire",
-        );
-        let jina = Self::merge_env_key(
-            jina,
-            env_overrides,
-            "JINA_API_KEY",
-            "jina",
-        );
+        let metaso = Self::merge_env_key(metaso, env_overrides, "METASO_API_KEY", "metaso");
+        let bocha = Self::merge_env_key(bocha, env_overrides, "BOCHA_API_KEY", "bocha");
+        let anspire = Self::merge_env_key(anspire, env_overrides, "ANSPIRE_API_KEY", "anspire");
+        let jina = Self::merge_env_key(jina, env_overrides, "JINA_API_KEY", "jina");
 
         if metaso_enabled && metaso.is_empty() {
             warn!("web_cn_search: metaso enabled but no API key configured");
@@ -357,7 +356,11 @@ impl WebCnSearchTool {
             .collect()
     }
 
-    async fn exec_search(&self, c: &reqwest::Client, a: &serde_json::Value) -> Result<serde_json::Value> {
+    async fn exec_search(
+        &self,
+        c: &reqwest::Client,
+        a: &serde_json::Value,
+    ) -> Result<serde_json::Value> {
         let query = require_query(a)?;
         let limit = usize_arg(a, "limit", 5).clamp(1, 50);
         let site = opt_str(a, "site");
@@ -400,7 +403,15 @@ impl WebCnSearchTool {
         let include_raw = bool_arg(a, "include_raw_content", false);
         let concise_snippet = bool_arg(a, "concise_snippet", false);
         let resp = self
-            .metaso_search(c, &query, size, scope, include_summary, include_raw, concise_snippet)
+            .metaso_search(
+                c,
+                &query,
+                size,
+                scope,
+                include_summary,
+                include_raw,
+                concise_snippet,
+            )
             .await?;
         Ok(resp)
     }
@@ -431,12 +442,22 @@ impl WebCnSearchTool {
         a: &serde_json::Value,
     ) -> Result<serde_json::Value> {
         let query = require_query(a)?;
-        let freshness = a.get("freshness").and_then(|v| v.as_str()).unwrap_or("noLimit");
+        let freshness = a
+            .get("freshness")
+            .and_then(|v| v.as_str())
+            .unwrap_or("noLimit");
         let summary = bool_arg(a, "bocha_summary", true);
         let include_domains = opt_str(a, "include_domains");
         let exclude_domains = opt_str(a, "exclude_domains");
         let resp = self
-            .bocha_search(c, &query, freshness, summary, include_domains.as_deref(), exclude_domains.as_deref())
+            .bocha_search(
+                c,
+                &query,
+                freshness,
+                summary,
+                include_domains.as_deref(),
+                exclude_domains.as_deref(),
+            )
             .await?;
         Ok(resp)
     }
@@ -474,7 +495,9 @@ impl WebCnSearchTool {
         let query = require_query(a)?;
         let count = u32_arg(a, "limit", 5).clamp(1, 20);
         let with_content = bool_arg(a, "with_content", false);
-        let resp = self.jina_search(c, &query, count, with_content, None).await?;
+        let resp = self
+            .jina_search(c, &query, count, with_content, None)
+            .await?;
         Ok(resp)
     }
 
@@ -637,7 +660,11 @@ impl WebCnSearchTool {
         if pool.is_empty() {
             anyhow::bail!("Anspire: no accounts configured");
         }
-        let url = if pro { ANSPIRE_PROSEARCH_URL } else { ANSPIRE_SEARCH_URL };
+        let url = if pro {
+            ANSPIRE_PROSEARCH_URL
+        } else {
+            ANSPIRE_SEARCH_URL
+        };
         let mut params: Vec<(&str, String)> = vec![
             ("query", query.to_string()),
             ("top_k", top_k.clamp(1, 50).to_string()),
@@ -763,7 +790,7 @@ impl WebCnSearchTool {
         for value in [metaso, bocha, anspire, jina] {
             match value {
                 Ok(Some(val)) => results.extend(parse_results(&val)),
-                Ok(None) => {}
+                Ok(None) => {},
                 Err(e) => errors.push(e.to_string()),
             }
         }
@@ -889,7 +916,10 @@ impl AgentTool for WebCnSearchTool {
         }
 
         let client = self.client()?;
-        let action = args.get("action").and_then(|v| v.as_str()).unwrap_or("search");
+        let action = args
+            .get("action")
+            .and_then(|v| v.as_str())
+            .unwrap_or("search");
         let output = match action {
             "search" => self.exec_search(&client, &args).await?,
             "metaso_search" => self.exec_metaso_search(&client, &args).await?,
@@ -905,11 +935,10 @@ impl AgentTool for WebCnSearchTool {
     }
 }
 
-fn env_value_with_overrides(
-    env_overrides: &HashMap<String, String>,
-    key: &str,
-) -> Option<String> {
-    std::env::var(key).ok().or_else(|| env_overrides.get(key).cloned())
+fn env_value_with_overrides(env_overrides: &HashMap<String, String>, key: &str) -> Option<String> {
+    std::env::var(key)
+        .ok()
+        .or_else(|| env_overrides.get(key).cloned())
 }
 
 fn require_query(a: &serde_json::Value) -> Result<String> {
@@ -930,11 +959,17 @@ fn opt_str(a: &serde_json::Value, key: &str) -> Option<String> {
 }
 
 fn usize_arg(a: &serde_json::Value, key: &str, default: usize) -> usize {
-    a.get(key).and_then(|v| v.as_u64()).map(|v| v as usize).unwrap_or(default)
+    a.get(key)
+        .and_then(|v| v.as_u64())
+        .map(|v| v as usize)
+        .unwrap_or(default)
 }
 
 fn u32_arg(a: &serde_json::Value, key: &str, default: u32) -> u32 {
-    a.get(key).and_then(|v| v.as_u64()).map(|v| v as u32).unwrap_or(default)
+    a.get(key)
+        .and_then(|v| v.as_u64())
+        .map(|v| v as u32)
+        .unwrap_or(default)
 }
 
 fn bool_arg(a: &serde_json::Value, key: &str, default: bool) -> bool {

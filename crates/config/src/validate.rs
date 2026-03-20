@@ -1035,9 +1035,7 @@ fn check_deprecated_table_field(
         severity: Severity::Warning,
         category: "deprecated-field",
         path: format!("{table_name}.{legacy}"),
-        message: format!(
-            "deprecated field; use \"{table_name}.{replacement}\" instead"
-        ),
+        message: format!("deprecated field; use \"{table_name}.{replacement}\" instead"),
     });
     false
 }
@@ -1698,7 +1696,8 @@ update_repository_url = "https://example.com/releases.json"
             result
                 .diagnostics
                 .iter()
-                .all(|d| !(d.category == "unknown-field" && d.path == "server.update_repository_url")),
+                .all(|d| !(d.category == "unknown-field"
+                    && d.path == "server.update_repository_url")),
             "legacy field should not be reported as unknown: {:?}",
             result.diagnostics
         );
@@ -2600,10 +2599,9 @@ app_secret = "secret"
 unexpected_toggle = true
  "#;
         let result = validate_toml_str(toml);
-        let warning = result
-            .diagnostics
-            .iter()
-            .find(|d| d.path == "channels.feishu.main.unexpected_toggle" && d.category == "unknown-field");
+        let warning = result.diagnostics.iter().find(|d| {
+            d.path == "channels.feishu.main.unexpected_toggle" && d.category == "unknown-field"
+        });
         assert!(
             warning.is_some(),
             "unknown nested feishu field should produce warning, got: {:?}",

@@ -279,15 +279,13 @@ impl ChannelService for LiveChannelService {
                 .map(|stored| stored.config);
         }
 
-        config
-            .map(redact_channel_config)
-            .ok_or_else(|| {
-                ServiceError::message(format!(
-                    "channel '{}' ({}) is not active",
-                    account_id,
-                    channel_type.as_str()
-                ))
-            })
+        config.map(redact_channel_config).ok_or_else(|| {
+            ServiceError::message(format!(
+                "channel '{}' ({}) is not active",
+                account_id,
+                channel_type.as_str()
+            ))
+        })
     }
 
     #[tracing::instrument(skip(self, params))]

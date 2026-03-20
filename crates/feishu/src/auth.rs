@@ -1,6 +1,9 @@
 use std::time::{Duration, Instant};
 
-use {anyhow::Result, secrecy::{ExposeSecret, Secret}};
+use {
+    anyhow::Result,
+    secrecy::{ExposeSecret, Secret},
+};
 
 use crate::config::FeishuAccountConfig;
 
@@ -61,10 +64,7 @@ async fn fetch_access_token(
         .get("tenant_access_token")
         .and_then(|v| v.as_str())
         .ok_or_else(|| anyhow::anyhow!("missing tenant_access_token"))?;
-    let expire = data
-        .get("expire")
-        .and_then(|v| v.as_u64())
-        .unwrap_or(3600);
+    let expire = data.get("expire").and_then(|v| v.as_u64()).unwrap_or(3600);
     let expires_at = Instant::now() + Duration::from_secs(expire.saturating_sub(60));
     Ok(CachedAccessToken {
         token: Secret::new(token.to_string()),

@@ -1,5 +1,4 @@
-use {async_trait::async_trait, secrecy::ExposeSecret, tracing::debug};
-use base64::Engine;
+use {async_trait::async_trait, base64::Engine, secrecy::ExposeSecret, tracing::debug};
 
 use {
     moltis_channels::{
@@ -9,11 +8,7 @@ use {
     moltis_common::types::{MediaAttachment, ReplyPayload},
 };
 
-use crate::{
-    auth::get_access_token,
-    config::FeishuAccountConfig,
-    state::AccountStateMap,
-};
+use crate::{auth::get_access_token, config::FeishuAccountConfig, state::AccountStateMap};
 
 /// Outbound sender for Feishu channel accounts.
 pub struct FeishuOutbound {
@@ -215,7 +210,8 @@ impl ChannelOutbound for FeishuOutbound {
             }
         }
         if !payload.text.is_empty() {
-            self.send_text(account_id, to, &payload.text, reply_to).await?;
+            self.send_text(account_id, to, &payload.text, reply_to)
+                .await?;
         }
         Ok(())
     }
@@ -332,11 +328,12 @@ async fn fetch_media_bytes(
         .and_then(|v| v.to_str().ok())
         .unwrap_or(&media.mime_type)
         .to_string();
-    let bytes = resp.bytes().await.map_err(|e| ChannelError::external("Feishu media fetch", e))?;
+    let bytes = resp
+        .bytes()
+        .await
+        .map_err(|e| ChannelError::external("Feishu media fetch", e))?;
     let filename = filename_from_url(&media.url)
-        .or_else(|| {
-            extension_from_mime(&mime).map(|ext| format!("upload.{ext}"))
-        })
+        .or_else(|| extension_from_mime(&mime).map(|ext| format!("upload.{ext}")))
         .unwrap_or_else(|| "upload".to_string());
     Ok((bytes.to_vec(), filename, mime))
 }
@@ -370,7 +367,11 @@ fn parse_data_url(url: &str) -> Option<(String, Vec<u8>)> {
 fn filename_from_url(url: &str) -> Option<String> {
     let parsed = url::Url::parse(url).ok()?;
     let seg = parsed.path_segments()?.last()?;
-    if seg.is_empty() { None } else { Some(seg.to_string()) }
+    if seg.is_empty() {
+        None
+    } else {
+        Some(seg.to_string())
+    }
 }
 
 fn extension_from_mime(mime_type: &str) -> Option<&'static str> {

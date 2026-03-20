@@ -1120,7 +1120,8 @@ mod tests {
     fn register_wasm_tools_succeeds_with_available_components() {
         let mut registry = ToolRegistry::new();
         let limits = WasmToolLimits::default();
-        let result = super::register_wasm_tools(&mut registry, &limits, 100, 30, 5, 15, 5, None, None);
+        let result =
+            super::register_wasm_tools(&mut registry, &limits, 100, 30, 5, 15, 5, None, None);
         // Should succeed regardless of whether wasm binaries are present.
         // When binaries are missing, individual tools log warnings but the
         // function itself returns Ok.

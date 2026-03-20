@@ -5,11 +5,9 @@ use std::{
     time::{Duration, Instant},
 };
 
-use {anyhow::Result, async_trait::async_trait, secrecy::ExposeSecret, url::Url};
-use tracing::warn;
+use {anyhow::Result, async_trait::async_trait, secrecy::ExposeSecret, tracing::warn, url::Url};
 
-use moltis_agents::tool_registry::AgentTool;
-use moltis_config::schema::WebReadConfig;
+use {moltis_agents::tool_registry::AgentTool, moltis_config::schema::WebReadConfig};
 
 const JINA_READER_URL: &str = "https://r.jina.ai/";
 const METASO_READER_URL: &str = "https://metaso.cn/api/v1/reader";
@@ -64,7 +62,7 @@ impl WebReadTool {
                 Err(e) => {
                     warn!("ignoring invalid ssrf_allowlist entry \"{s}\": {e}");
                     None
-                }
+                },
             })
             .collect();
 
@@ -211,7 +209,14 @@ impl WebReadTool {
             .header("x-proxy", "auto")
             .header("x-return-format", "markdown")
             .header("x-retain-images", "none")
-            .header("x-with-links-summary", if with_links { "true" } else { "false" })
+            .header(
+                "x-with-links-summary",
+                if with_links {
+                    "true"
+                } else {
+                    "false"
+                },
+            )
             .send()
             .await?;
         if !resp.status().is_success() {
@@ -264,7 +269,10 @@ impl WebReadTool {
             }
         });
         let resp = client
-            .post(format!("{}/crawl", self.crawl4ai_endpoint.trim_end_matches('/')))
+            .post(format!(
+                "{}/crawl",
+                self.crawl4ai_endpoint.trim_end_matches('/')
+            ))
             .bearer_auth(&self.crawl4ai_token)
             .json(&body)
             .send()
@@ -295,7 +303,10 @@ impl WebReadTool {
         let client = self.client_fast(self.pinchtab_timeout_secs)?;
         let body = serde_json::json!({ "url": url, "format": "markdown" });
         let resp = client
-            .post(format!("{}/api/fetch", self.pinchtab_endpoint.trim_end_matches('/')))
+            .post(format!(
+                "{}/api/fetch",
+                self.pinchtab_endpoint.trim_end_matches('/')
+            ))
             .header("Authorization", format!("Bearer {}", self.pinchtab_token))
             .json(&body)
             .send()
@@ -333,7 +344,7 @@ impl WebReadTool {
                     self.cache_set(cache_key, result.clone());
                     return Ok(result);
                 }
-            }
+            },
             Err(e) => errors.push(format!("jina: {e}")),
         }
 
@@ -344,7 +355,7 @@ impl WebReadTool {
                     self.cache_set(cache_key, result.clone());
                     return Ok(result);
                 }
-            }
+            },
             Err(e) => errors.push(format!("metaso: {e}")),
         }
 
@@ -355,7 +366,7 @@ impl WebReadTool {
                     self.cache_set(cache_key, result.clone());
                     return Ok(result);
                 }
-            }
+            },
             Err(e) => errors.push(format!("crawl4ai: {e}")),
         }
 
@@ -366,7 +377,7 @@ impl WebReadTool {
                     self.cache_set(cache_key, result.clone());
                     return Ok(result);
                 }
-            }
+            },
             Err(e) => errors.push(format!("pinchtab: {e}")),
         }
 
@@ -411,7 +422,10 @@ impl AgentTool for WebReadTool {
             .filter(|s| !s.is_empty())
             .ok_or_else(|| anyhow::anyhow!("missing 'url' parameter"))?;
 
-        let with_links = params.get("with_links").and_then(|v| v.as_bool()).unwrap_or(false);
+        let with_links = params
+            .get("with_links")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
 
         let result = self.fetch(url, with_links).await?;
         Ok(self.attach_warnings(result))
@@ -443,11 +457,10 @@ fn truncate(s: &str, max: usize) -> &str {
     &s[..end]
 }
 
-fn env_value_with_overrides(
-    env_overrides: &HashMap<String, String>,
-    key: &str,
-) -> Option<String> {
-    std::env::var(key).ok().or_else(|| env_overrides.get(key).cloned())
+fn env_value_with_overrides(env_overrides: &HashMap<String, String>, key: &str) -> Option<String> {
+    std::env::var(key)
+        .ok()
+        .or_else(|| env_overrides.get(key).cloned())
 }
 
 fn is_ssrf_allowed(ip: &IpAddr, allowlist: &[ipnet::IpNet]) -> bool {
@@ -466,7 +479,11 @@ async fn ssrf_check(url: &Url, allowlist: &[ipnet::IpNet]) -> Result<()> {
         return Ok(());
     }
 
-    let port = if url.scheme() == "http" { 80 } else { 443 };
+    let port = if url.scheme() == "http" {
+        80
+    } else {
+        443
+    };
     let addrs = tokio::net::lookup_host((host, port)).await?;
     for addr in addrs {
         if is_private_ip(&addr.ip()) && !is_ssrf_allowed(&addr.ip(), allowlist) {
@@ -525,7 +542,11 @@ mod tests {
         cfg.pinchtab.token = secrecy::Secret::new("token".to_string());
         let tool = WebReadTool::from_config_with_env_overrides(&cfg, &HashMap::new()).unwrap();
         let warnings = tool.warnings();
-        assert!(warnings.iter().any(|w| w.contains("pinchtab token set but endpoint is missing")));
+        assert!(
+            warnings
+                .iter()
+                .any(|w| w.contains("pinchtab token set but endpoint is missing"))
+        );
     }
 
     #[test]

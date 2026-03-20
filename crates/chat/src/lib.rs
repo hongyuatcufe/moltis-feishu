@@ -1038,7 +1038,10 @@ fn resolve_known_agent_id(
     let Some(entry) = session_entry else {
         return "main".to_string();
     };
-    let Some(agent_id) = raw_agent_id.map(str::trim).filter(|value| !value.is_empty()) else {
+    let Some(agent_id) = raw_agent_id
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    else {
         return "main".to_string();
     };
     if agent_id == "main" {
@@ -3494,8 +3497,7 @@ impl ChatService for LiveChatService {
         // per-session sandbox override details for prompt runtime context.
         let session_entry = self.session_metadata.get(&session_key).await;
         let session_agent_id = resolve_prompt_agent_id(session_entry.as_ref());
-        let session_memory_owner_agent_id =
-            resolve_memory_owner_agent_id(session_entry.as_ref());
+        let session_memory_owner_agent_id = resolve_memory_owner_agent_id(session_entry.as_ref());
         let session_agent_mode = resolve_session_agent_mode(session_entry.as_ref());
         let allow_memory_write = session_agent_mode == AGENT_MODE_ATTACHED;
         let mcp_disabled = session_entry
@@ -4033,8 +4035,7 @@ impl ChatService for LiveChatService {
 
         let session_entry = self.session_metadata.get(&session_key).await;
         let session_agent_id = resolve_prompt_agent_id(session_entry.as_ref());
-        let session_memory_owner_agent_id =
-            resolve_memory_owner_agent_id(session_entry.as_ref());
+        let session_memory_owner_agent_id = resolve_memory_owner_agent_id(session_entry.as_ref());
         let allow_memory_write =
             resolve_session_agent_mode(session_entry.as_ref()) == AGENT_MODE_ATTACHED;
         let mut runtime_context = build_prompt_runtime_context(
@@ -4517,7 +4518,8 @@ impl ChatService for LiveChatService {
 
         // Save compaction summary to memory file and trigger sync.
         if allow_memory_write && let Some(mm) = self.state.memory_manager() {
-            let memory_dir = moltis_config::agent_workspace_dir(&memory_owner_agent_id).join("memory");
+            let memory_dir =
+                moltis_config::agent_workspace_dir(&memory_owner_agent_id).join("memory");
             if let Err(e) = tokio::fs::create_dir_all(&memory_dir).await {
                 warn!(error = %e, "compact: failed to create memory dir");
             } else {
@@ -8684,7 +8686,10 @@ mod tests {
         let entry = test_session_entry();
         assert_eq!(resolve_prompt_agent_id(Some(&entry)), "writer");
         assert_eq!(resolve_memory_owner_agent_id(Some(&entry)), "main");
-        assert_eq!(resolve_session_agent_mode(Some(&entry)), AGENT_MODE_EPHEMERAL);
+        assert_eq!(
+            resolve_session_agent_mode(Some(&entry)),
+            AGENT_MODE_EPHEMERAL
+        );
     }
 
     #[async_trait]

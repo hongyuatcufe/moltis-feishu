@@ -370,5 +370,4 @@ mod tests {
         let results = parse_brave_results(&body);
         assert_eq!(results[0]["description"], "");
     }
-
 }

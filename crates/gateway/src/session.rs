@@ -950,7 +950,9 @@ impl LiveSessionService {
             .map(str::trim)
             .filter(|value| !value.is_empty())
         else {
-            let active = self.resolve_agent_id_for_entry(entry, patch_if_invalid).await;
+            let active = self
+                .resolve_agent_id_for_entry(entry, patch_if_invalid)
+                .await;
             if patch_if_invalid {
                 let _ = self
                     .metadata
@@ -1003,7 +1005,9 @@ impl LiveSessionService {
         entry: &moltis_sessions::metadata::SessionEntry,
         patch_if_invalid: bool,
     ) -> String {
-        let active_agent = self.resolve_agent_id_for_entry(entry, patch_if_invalid).await;
+        let active_agent = self
+            .resolve_agent_id_for_entry(entry, patch_if_invalid)
+            .await;
         let memory_owner = self
             .resolve_memory_owner_agent_id_for_entry(entry, patch_if_invalid)
             .await;
@@ -1026,7 +1030,10 @@ impl LiveSessionService {
                 AGENT_MODE_EPHEMERAL
             };
             if patch_if_invalid {
-                let _ = self.metadata.set_agent_mode(&entry.key, Some(fallback)).await;
+                let _ = self
+                    .metadata
+                    .set_agent_mode(&entry.key, Some(fallback))
+                    .await;
             }
             return fallback.to_string();
         }
@@ -1086,10 +1093,7 @@ impl LiveSessionService {
             } else {
                 AGENT_MODE_EPHEMERAL
             };
-            let _ = self
-                .metadata
-                .set_agent_mode(key, Some(fallback_mode))
-                .await;
+            let _ = self.metadata.set_agent_mode(key, Some(fallback_mode)).await;
         }
         self.metadata.get(key).await
     }
@@ -2961,7 +2965,10 @@ mod tests {
             .set_memory_owner_agent_id("legacy-session", Some("main"))
             .await
             .unwrap();
-        metadata.set_agent_mode("legacy-session", None).await.unwrap();
+        metadata
+            .set_agent_mode("legacy-session", None)
+            .await
+            .unwrap();
 
         let svc = LiveSessionService::new(store, Arc::clone(&metadata));
         let resolved = svc
@@ -2996,7 +3003,10 @@ mod tests {
             .set_memory_owner_agent_id("legacy-session", None)
             .await
             .unwrap();
-        metadata.set_agent_mode("legacy-session", None).await.unwrap();
+        metadata
+            .set_agent_mode("legacy-session", None)
+            .await
+            .unwrap();
 
         let svc = LiveSessionService::new(store, Arc::clone(&metadata));
         let resolved = svc

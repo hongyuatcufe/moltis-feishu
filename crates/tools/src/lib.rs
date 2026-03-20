@@ -66,7 +66,6 @@ pub mod sessions_communicate;
 pub mod sessions_manage;
 pub mod skill_tools;
 pub mod spawn_agent;
-pub mod web_cn_search;
 pub mod ssrf;
 pub mod task_list;
 #[cfg(feature = "wasm")]
@@ -76,6 +75,7 @@ pub mod wasm_engine;
 pub mod wasm_limits;
 #[cfg(feature = "wasm")]
 pub mod wasm_tool_runner;
+pub mod web_cn_search;
 pub mod web_fetch;
 pub mod web_read;
 pub mod web_search;

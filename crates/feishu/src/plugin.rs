@@ -1,18 +1,20 @@
 use std::{
     collections::HashMap,
     sync::{
-        Arc,
-        RwLock,
+        Arc, RwLock,
         atomic::{AtomicBool, Ordering},
     },
     time::Instant,
 };
 
-use {async_trait::async_trait, secrecy::ExposeSecret, tracing::{info, warn}};
+use {
+    async_trait::async_trait,
+    secrecy::ExposeSecret,
+    tracing::{info, warn},
+};
 
 use moltis_channels::{
-    ChannelConfigView,
-    ChannelEventSink, Error as ChannelError, Result as ChannelResult,
+    ChannelConfigView, ChannelEventSink, Error as ChannelError, Result as ChannelResult,
     message_log::MessageLog,
     plugin::{
         ChannelHealthSnapshot, ChannelOutbound, ChannelPlugin, ChannelStatus, ChannelStreamOutbound,

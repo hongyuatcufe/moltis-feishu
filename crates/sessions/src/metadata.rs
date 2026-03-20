@@ -775,7 +775,11 @@ impl SqliteSessionMetadata {
         sqlx::query(
             "UPDATE sessions SET archived = ?, updated_at = ?, version = version + 1 WHERE key = ?",
         )
-        .bind(if archived { 1_i32 } else { 0_i32 })
+        .bind(if archived {
+            1_i32
+        } else {
+            0_i32
+        })
         .bind(now)
         .bind(key)
         .execute(&self.pool)

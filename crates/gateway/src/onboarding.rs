@@ -158,10 +158,7 @@ impl GatewayOnboardingService {
                 .session_metadata
                 .set_memory_owner_agent_id(&entry.key, imported_owner)
                 .await;
-            let imported_mode = entry
-                .agent_mode
-                .as_deref()
-                .or(Some("attached"));
+            let imported_mode = entry.agent_mode.as_deref().or(Some("attached"));
             let _ = self
                 .session_metadata
                 .set_agent_mode(&entry.key, imported_mode)

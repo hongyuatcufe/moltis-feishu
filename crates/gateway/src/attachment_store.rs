@@ -1,8 +1,10 @@
 use std::path::{Path, PathBuf};
 
-use anyhow::Result;
-use sha2::{Digest, Sha256};
-use sqlx::SqlitePool;
+use {
+    anyhow::Result,
+    sha2::{Digest, Sha256},
+    sqlx::SqlitePool,
+};
 
 #[derive(Debug, Clone)]
 pub struct StoredAttachment {
@@ -41,7 +43,10 @@ impl AttachmentStore {
         Self { pool, base_dir }
     }
 
-    pub async fn save_channel_attachment(&self, req: SaveChannelAttachment<'_>) -> Result<StoredAttachment> {
+    pub async fn save_channel_attachment(
+        &self,
+        req: SaveChannelAttachment<'_>,
+    ) -> Result<StoredAttachment> {
         let now = now_ms();
         let mut hasher = Sha256::new();
         hasher.update(req.data);
@@ -112,11 +117,7 @@ impl AttachmentStore {
             .extension()
             .and_then(|v| v.to_str())
             .unwrap_or(ext.as_str());
-        let original_name = sanitize_original_name(
-            req.original_name,
-            &blob_sha256,
-            stored_ext,
-        );
+        let original_name = sanitize_original_name(req.original_name, &blob_sha256, stored_ext);
         sqlx::query(
             "INSERT INTO attachment_refs
                 (id, session_key, channel_type, account_id, chat_id, message_id, blob_sha256, original_name, created_at)
@@ -176,9 +177,13 @@ fn infer_extension(media_type: &str, original_name: Option<&str>) -> String {
         }
     }
     match media_type.to_ascii_lowercase().as_str() {
-        "application/vnd.openxmlformats-officedocument.wordprocessingml.document" => "docx".to_string(),
+        "application/vnd.openxmlformats-officedocument.wordprocessingml.document" => {
+            "docx".to_string()
+        },
         "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" => "xlsx".to_string(),
-        "application/vnd.openxmlformats-officedocument.presentationml.presentation" => "pptx".to_string(),
+        "application/vnd.openxmlformats-officedocument.presentationml.presentation" => {
+            "pptx".to_string()
+        },
         "application/msword" => "doc".to_string(),
         "application/vnd.ms-excel" => "xls".to_string(),
         "application/pdf" => "pdf".to_string(),
@@ -194,17 +199,19 @@ fn infer_extension(media_type: &str, original_name: Option<&str>) -> String {
     }
 }
 
-fn sanitize_original_name(
-    raw_name: Option<&str>,
-    blob_sha256: &str,
-    ext: &str,
-) -> String {
+fn sanitize_original_name(raw_name: Option<&str>, blob_sha256: &str, ext: &str) -> String {
     if let Some(name) = raw_name {
         let trimmed = name.trim();
         if !trimmed.is_empty() {
             let replaced = trimmed
                 .chars()
-                .map(|c| if c == '/' || c == '\\' || c.is_control() { '_' } else { c })
+                .map(|c| {
+                    if c == '/' || c == '\\' || c.is_control() {
+                        '_'
+                    } else {
+                        c
+                    }
+                })
                 .collect::<String>();
             if !replaced.is_empty() {
                 return replaced;

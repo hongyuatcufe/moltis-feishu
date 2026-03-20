@@ -215,21 +215,16 @@ impl AgentPersonaStore {
         Self { pool }
     }
 
-    async fn ensure_aliases_available(
-        &self,
-        agent_id: &str,
-        aliases: &[String],
-    ) -> Result<()> {
+    async fn ensure_aliases_available(&self, agent_id: &str, aliases: &[String]) -> Result<()> {
         if aliases.is_empty() {
             return Ok(());
         }
 
-        let rows = sqlx::query_as::<_, (String, String)>(
-            "SELECT id, aliases FROM agents WHERE id != ?",
-        )
-        .bind(agent_id)
-        .fetch_all(&self.pool)
-        .await?;
+        let rows =
+            sqlx::query_as::<_, (String, String)>("SELECT id, aliases FROM agents WHERE id != ?")
+                .bind(agent_id)
+                .fetch_all(&self.pool)
+                .await?;
 
         let mut taken = HashSet::new();
         taken.insert("main".to_string());
@@ -360,8 +355,8 @@ impl AgentPersonaStore {
             ));
         }
         self.ensure_aliases_available(&params.id, &aliases).await?;
-        let aliases_json =
-            serde_json::to_string(&aliases).map_err(|e| AgentError::InvalidRequest(e.to_string()))?;
+        let aliases_json = serde_json::to_string(&aliases)
+            .map_err(|e| AgentError::InvalidRequest(e.to_string()))?;
 
         let now = now_ms();
         sqlx::query(
@@ -428,8 +423,8 @@ impl AgentPersonaStore {
         } else {
             existing.aliases
         };
-        let aliases_json =
-            serde_json::to_string(&aliases).map_err(|e| AgentError::InvalidRequest(e.to_string()))?;
+        let aliases_json = serde_json::to_string(&aliases)
+            .map_err(|e| AgentError::InvalidRequest(e.to_string()))?;
         let emoji = params.emoji.or(existing.emoji);
         let theme = params.theme.or(existing.theme);
         let description = params.description.or(existing.description);
@@ -691,10 +686,10 @@ mod tests {
             .unwrap();
 
         assert_eq!(updated.name, "Creative Writer");
-        assert_eq!(
-            updated.aliases,
-            vec!["alice".to_string(), "writer-helper".to_string()]
-        );
+        assert_eq!(updated.aliases, vec![
+            "alice".to_string(),
+            "writer-helper".to_string()
+        ]);
         assert_eq!(updated.emoji.as_deref(), Some("✍️"));
     }
 

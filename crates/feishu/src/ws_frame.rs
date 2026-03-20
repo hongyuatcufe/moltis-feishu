@@ -1,5 +1,4 @@
-use anyhow::Result;
-use prost::Message;
+use {anyhow::Result, prost::Message};
 
 #[derive(Clone, PartialEq, Message)]
 pub struct FeishuHeader {

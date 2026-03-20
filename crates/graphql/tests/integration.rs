@@ -196,6 +196,10 @@ impl moltis_service_traits::ChannelService for MockChannel {
         self.0.call("channels.status", json!({}))
     }
 
+    async fn account_config(&self, p: Value) -> ServiceResult {
+        self.0.call("channels.account_config", p)
+    }
+
     async fn logout(&self, p: Value) -> ServiceResult {
         self.0.call("channels.logout", p)
     }

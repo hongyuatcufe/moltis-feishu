@@ -8,5 +8,4 @@ mod state;
 mod ws;
 mod ws_frame;
 
-pub use config::FeishuAccountConfig;
-pub use plugin::FeishuPlugin;
+pub use {config::FeishuAccountConfig, plugin::FeishuPlugin};

@@ -508,8 +508,7 @@ impl WebSearchTool {
                         if title.is_empty() || url.is_empty() {
                             return None;
                         }
-                        let description =
-                            r.get("content").and_then(|v| v.as_str()).unwrap_or("");
+                        let description = r.get("content").and_then(|v| v.as_str()).unwrap_or("");
                         Some(serde_json::json!({
                             "title": title,
                             "url": url,
@@ -1220,7 +1219,10 @@ mod tests {
             ..Default::default()
         };
         let tool = WebSearchTool::from_config(&cfg);
-        assert!(tool.is_some(), "Tavily tool should register with an API key");
+        assert!(
+            tool.is_some(),
+            "Tavily tool should register with an API key"
+        );
     }
 
     // --- DuckDuckGo fallback tests ---
