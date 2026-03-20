@@ -6756,6 +6756,7 @@ dependencies = [
  "async-trait",
  "base64 0.22.1",
  "bytes",
+ "encoding_rs",
  "futures",
  "image",
  "ipnet",

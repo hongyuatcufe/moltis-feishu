@@ -1,9 +1,12 @@
 use std::{
     collections::HashMap,
+    sync::OnceLock,
     sync::Mutex,
     time::{Duration, Instant},
 };
 
+use encoding_rs::{Encoding, GB18030, UTF_8};
+use regex::Regex;
 use {async_trait::async_trait, tracing::debug, url::Url};
 
 use crate::error::Error;
@@ -177,7 +180,9 @@ impl WebFetchTool {
                 .unwrap_or("")
                 .to_string();
 
-            let body = resp.text().await?;
+            let headers = resp.headers().clone();
+            let body_bytes = resp.bytes().await?;
+            let body = decode_response_body(&headers, &body_bytes);
 
             let (content, detected_mode) =
                 extract_content(&body, &content_type, extract_mode, self.readability);
@@ -199,6 +204,58 @@ impl WebFetchTool {
             }));
         }
     }
+}
+
+fn decode_response_body(headers: &reqwest::header::HeaderMap, body: &[u8]) -> String {
+    if let Some(encoding) = detect_charset_from_headers(headers) {
+        let (decoded, _, _) = encoding.decode(body);
+        return decoded.into_owned();
+    }
+
+    if let Some(encoding) = detect_charset_from_html(body) {
+        let (decoded, _, _) = encoding.decode(body);
+        return decoded.into_owned();
+    }
+
+    match std::str::from_utf8(body) {
+        Ok(text) => text.to_string(),
+        Err(_) => {
+            let (decoded, _, had_errors) = UTF_8.decode(body);
+            if !had_errors {
+                return decoded.into_owned();
+            }
+            let (decoded, _, _) = GB18030.decode(body);
+            decoded.into_owned()
+        },
+    }
+}
+
+fn detect_charset_from_headers(headers: &reqwest::header::HeaderMap) -> Option<&'static Encoding> {
+    let content_type = headers.get(reqwest::header::CONTENT_TYPE)?.to_str().ok()?;
+    let lower = content_type.to_ascii_lowercase();
+    let charset = lower.split(';').find_map(|part| {
+        let part = part.trim();
+        part.strip_prefix("charset=").map(str::trim)
+    })?;
+    Encoding::for_label(charset.as_bytes())
+}
+
+fn detect_charset_from_html(body: &[u8]) -> Option<&'static Encoding> {
+    let sniff_len = body.len().min(4096);
+    let head = String::from_utf8_lossy(&body[..sniff_len]).to_ascii_lowercase();
+
+    if let Some(idx) = head.find("charset=") {
+        let tail = &head[idx + "charset=".len()..];
+        let charset: String = tail
+            .chars()
+            .take_while(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '-' | '_'))
+            .collect();
+        if !charset.is_empty() {
+            return Encoding::for_label(charset.as_bytes());
+        }
+    }
+
+    None
 }
 
 /// Extract readable content from the response body based on content type.
@@ -238,107 +295,47 @@ fn extract_content(
 /// collapse whitespace. A lightweight alternative to a full readability
 /// crate — good enough for most pages.
 fn html_to_text(html: &str) -> String {
-    let mut result = String::with_capacity(html.len() / 2);
-    let mut in_tag = false;
-    let mut in_script = false;
-    let mut in_style = false;
-    let mut last_was_space = false;
+    static SCRIPT_RE: OnceLock<Regex> = OnceLock::new();
+    static STYLE_RE: OnceLock<Regex> = OnceLock::new();
+    static BLOCK_RE: OnceLock<Regex> = OnceLock::new();
+    static TAG_RE: OnceLock<Regex> = OnceLock::new();
+    static WS_RE: OnceLock<Regex> = OnceLock::new();
 
-    let html_lower = html.to_lowercase();
-    let bytes = html.as_bytes();
-    let lower_bytes = html_lower.as_bytes();
+    let script_re = SCRIPT_RE
+        .get_or_init(|| Regex::new(r"(?is)<script\b[^>]*>.*?</script>").expect("valid regex"));
+    let style_re = STYLE_RE
+        .get_or_init(|| Regex::new(r"(?is)<style\b[^>]*>.*?</style>").expect("valid regex"));
+    let block_re = BLOCK_RE.get_or_init(|| {
+        Regex::new(r"(?i)</?(?:br|p|div|h[1-6]|li|ul|ol|section|article|tr|td|th)[^>]*>")
+            .expect("valid regex")
+    });
+    let tag_re = TAG_RE.get_or_init(|| Regex::new(r"(?is)<[^>]+>").expect("valid regex"));
+    let ws_re = WS_RE.get_or_init(|| Regex::new(r"[ \t\r\f\v]+").expect("valid regex"));
 
-    let mut i = 0;
-    while i < bytes.len() {
-        if bytes[i] == b'<' {
-            // Check for script/style open/close tags.
-            if i + 7 < lower_bytes.len() && &lower_bytes[i..i + 7] == b"<script" {
-                in_script = true;
-            }
-            if i + 9 < lower_bytes.len() && &lower_bytes[i..i + 9] == b"</script>" {
-                in_script = false;
-            }
-            if i + 6 < lower_bytes.len() && &lower_bytes[i..i + 6] == b"<style" {
-                in_style = true;
-            }
-            if i + 8 < lower_bytes.len() && &lower_bytes[i..i + 8] == b"</style>" {
-                in_style = false;
-            }
+    let without_script = script_re.replace_all(html, " ");
+    let without_style = style_re.replace_all(&without_script, " ");
+    let with_breaks = block_re.replace_all(&without_style, "\n");
+    let without_tags = tag_re.replace_all(&with_breaks, " ");
+    let decoded = decode_html_entities(&without_tags);
 
-            // Block-level tags → newline.
-            if !in_script && !in_style {
-                let tag_start = &html_lower[i..];
-                if tag_start.starts_with("<br")
-                    || tag_start.starts_with("<p")
-                    || tag_start.starts_with("</p")
-                    || tag_start.starts_with("<div")
-                    || tag_start.starts_with("</div")
-                    || tag_start.starts_with("<h")
-                    || tag_start.starts_with("</h")
-                    || tag_start.starts_with("<li")
-                {
-                    if !result.ends_with('\n') {
-                        result.push('\n');
-                    }
-                    last_was_space = true;
-                }
-            }
+    decoded
+        .lines()
+        .map(|line| ws_re.replace_all(line.trim(), " ").into_owned())
+        .filter(|line| !line.is_empty())
+        .collect::<Vec<_>>()
+        .join("\n")
+}
 
-            in_tag = true;
-            i += 1;
-            continue;
-        }
-
-        if bytes[i] == b'>' {
-            in_tag = false;
-            i += 1;
-            continue;
-        }
-
-        if in_tag || in_script || in_style {
-            i += 1;
-            continue;
-        }
-
-        // Decode HTML entities.
-        if bytes[i] == b'&' {
-            let rest = &html[i..];
-            if let Some(semi) = rest.find(';') {
-                let entity = &rest[..semi + 1];
-                let decoded = match entity {
-                    "&amp;" => "&",
-                    "&lt;" => "<",
-                    "&gt;" => ">",
-                    "&quot;" => "\"",
-                    "&apos;" | "&#39;" => "'",
-                    "&nbsp;" | "&#160;" => " ",
-                    _ => {
-                        // Skip unknown entities.
-                        i += 1;
-                        continue;
-                    },
-                };
-                result.push_str(decoded);
-                last_was_space = decoded == " ";
-                i += entity.len();
-                continue;
-            }
-        }
-
-        let ch = bytes[i] as char;
-        if ch.is_ascii_whitespace() {
-            if !last_was_space {
-                result.push(' ');
-                last_was_space = true;
-            }
-        } else {
-            result.push(ch);
-            last_was_space = false;
-        }
-        i += 1;
-    }
-
-    result.trim().to_string()
+fn decode_html_entities(input: &str) -> String {
+    input
+        .replace("&amp;", "&")
+        .replace("&lt;", "<")
+        .replace("&gt;", ">")
+        .replace("&quot;", "\"")
+        .replace("&apos;", "'")
+        .replace("&#39;", "'")
+        .replace("&nbsp;", " ")
+        .replace("&#160;", " ")
 }
 
 /// Truncate a string at a char boundary, not mid-UTF-8.
@@ -548,6 +545,14 @@ mod tests {
     }
 
     #[test]
+    fn test_html_to_text_preserves_utf8_chinese() {
+        let html = "<html><body><h1>新浪教育</h1><p>教育热点新闻</p></body></html>";
+        let text = html_to_text(html);
+        assert!(text.contains("新浪教育"));
+        assert!(text.contains("教育热点新闻"));
+    }
+
+    #[test]
     fn test_extract_content_json() {
         let body = r#"{"key": "value"}"#;
         let (content, mode) = extract_content(body, "application/json", "text", true);
@@ -577,6 +582,29 @@ mod tests {
         // Should not panic and should be valid UTF-8.
         assert!(truncated.len() <= 3);
         assert!(std::str::from_utf8(truncated.as_bytes()).is_ok());
+    }
+
+    #[test]
+    fn test_decode_response_body_uses_header_charset() {
+        let mut headers = reqwest::header::HeaderMap::new();
+        headers.insert(
+            reqwest::header::CONTENT_TYPE,
+            reqwest::header::HeaderValue::from_static("text/html; charset=gbk"),
+        );
+        let (body, _, _) = GB18030.encode("教育热点");
+
+        let decoded = decode_response_body(&headers, body.as_ref());
+        assert_eq!(decoded, "教育热点");
+    }
+
+    #[test]
+    fn test_decode_response_body_uses_html_meta_charset() {
+        let headers = reqwest::header::HeaderMap::new();
+        let html = r#"<html><head><meta charset="gbk"></head><body>教育热点</body></html>"#;
+        let (body, _, _) = GB18030.encode(html);
+
+        let decoded = decode_response_body(&headers, body.as_ref());
+        assert!(decoded.contains("教育热点"));
     }
 
     // --- Cache tests ---

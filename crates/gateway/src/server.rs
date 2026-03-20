@@ -539,6 +539,26 @@ fn approval_manager_from_config(config: &moltis_config::MoltisConfig) -> Approva
     manager
 }
 
+fn register_web_tools(
+    tool_registry: &mut moltis_agents::tool_registry::ToolRegistry,
+    config: &moltis_config::MoltisConfig,
+    runtime_env_overrides: &HashMap<String, String>,
+    env_provider: &Arc<dyn EnvVarProvider>,
+) {
+    if let Some(t) = moltis_tools::web_search::WebSearchTool::from_config_with_env_overrides(
+        &config.tools.web.search,
+        runtime_env_overrides,
+    ) {
+        tool_registry.register(Box::new(t.with_env_provider(Arc::clone(env_provider))));
+    }
+    if let Some(t) = moltis_tools::web_cn_search::WebCnSearchTool::from_config_with_env_overrides(
+        &config.tools.web.cn_search,
+        runtime_env_overrides,
+    ) {
+        tool_registry.register(Box::new(t));
+    }
+}
+
 // ── Shared app state ─────────────────────────────────────────────────────────
 
 #[derive(Clone)]
@@ -3632,12 +3652,12 @@ pub async fn prepare_gateway(
             moltis_tools::send_image::SendImageTool::new()
                 .with_sandbox_router(Arc::clone(&sandbox_router)),
         ));
-        if let Some(t) = moltis_tools::web_search::WebSearchTool::from_config_with_env_overrides(
-            &config.tools.web.search,
+        register_web_tools(
+            &mut tool_registry,
+            &config,
             &runtime_env_overrides,
-        ) {
-            tool_registry.register(Box::new(t.with_env_provider(Arc::clone(&env_provider))));
-        }
+            &env_provider,
+        );
         if let Some(t) = moltis_tools::web_fetch::WebFetchTool::from_config(&config.tools.web.fetch)
         {
             #[cfg(feature = "trusted-network")]
@@ -6385,6 +6405,48 @@ mod tests {
         let manager = approval_manager_from_config(&cfg);
         assert_eq!(manager.mode, ApprovalMode::OnMiss);
         assert_eq!(manager.security_level, SecurityLevel::Allowlist);
+    }
+
+    #[test]
+    fn register_web_tools_includes_cn_search_when_enabled() {
+        #[derive(Default)]
+        struct NoopEnvProvider;
+
+        #[async_trait::async_trait]
+        impl EnvVarProvider for NoopEnvProvider {
+            async fn get_env_vars(&self) -> Vec<(String, Secret<String>)> {
+                Vec::new()
+            }
+        }
+
+        let mut cfg = moltis_config::MoltisConfig::default();
+        cfg.tools.web.search.enabled = true;
+        cfg.tools.web.search.provider = moltis_config::schema::SearchProvider::Tavily;
+        cfg.tools.web.search.tavily.api_key = Some(Secret::new("tvly-test".into()));
+        cfg.tools.web.cn_search.enabled = true;
+        cfg.tools.web.cn_search.metaso.enabled = true;
+        cfg.tools.web.cn_search.metaso.accounts = vec![moltis_config::schema::ApiKeyEntry {
+            name: "metaso-main".into(),
+            api_key: Secret::new("metaso-test".into()),
+            enabled: true,
+        }];
+
+        let env_provider: Arc<dyn EnvVarProvider> = Arc::new(NoopEnvProvider);
+        let mut registry = moltis_agents::tool_registry::ToolRegistry::new();
+        register_web_tools(&mut registry, &cfg, &HashMap::new(), &env_provider);
+
+        let tool_names: HashSet<String> = registry
+            .list_schemas()
+            .into_iter()
+            .filter_map(|schema| {
+                schema
+                    .get("name")
+                    .and_then(serde_json::Value::as_str)
+                    .map(ToString::to_string)
+            })
+            .collect();
+        assert!(tool_names.contains("web_search"));
+        assert!(tool_names.contains("web_cn_search"));
     }
 
     #[tokio::test]
